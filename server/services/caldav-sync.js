@@ -9,10 +9,18 @@ const log = createLogger('CalDAV');
 
 import * as db from '../db.js';
 import { decodeHtmlEntities } from '../utils/html-entities.js';
+import * as editOperations from './calendar-edit-operations.js';
+import { recoverFollowingCalendarEditAfterReadback } from './calendar-edit.js';
 import { assignDefaultToEvent } from './sync-assignment.js';
 import { pruneDeletedEvents, countMirroredEvents, deleteMirroredEvents } from './calendar-prune.js';
 import * as outbound from './calendar-outbound.js';
-import { processPendingDeletions, processPendingUpdates, flushAccount } from './caldav-outbound.js';
+import {
+  processPendingDeletions,
+  processPendingUpdates,
+  flushAccount,
+  processScopedOperation,
+  caldavWriteCapability,
+} from './caldav-outbound.js';
 import { detachAccountRows } from './caldav-todo-outbound.js';
 import { toICSDatetime, escapeICSText } from '../utils/ics-format.js';
 import { eventDateTimeFields } from '../utils/ics-datetime.js';
@@ -102,6 +110,130 @@ function upsertExternalCalendar(source, externalId, name, color) {
   return row.id;
 }
 
+const caldavCalendarMetaKey = (calendarUrl) =>
+  `calendar_provider_meta:caldav:${encodeURIComponent(calendarUrl)}`;
+const caldavObjectMetaKey = (calendarUrl, uid) =>
+  `calendar_provider_event:caldav:${encodeURIComponent(calendarUrl)}:${encodeURIComponent(uid)}`;
+
+// tsdav only returns the standard calendar properties by default. Request the
+// DAV current-user-privilege-set as a projected property so mailbox.org and
+// other ACL-aware servers can prove write access before a scoped edit is saved.
+const calendarDiscoveryProps = {
+  'c:calendar-description': {},
+  'c:calendar-timezone': {},
+  'd:displayname': {},
+  'd:current-user-privilege-set': {},
+  'ca:calendar-color': {},
+  'cs:getctag': {},
+  'd:resourcetype': {},
+  'c:supported-calendar-component-set': {},
+  'd:sync-token': {},
+};
+
+async function fetchCalendarsWithPrivileges(client) {
+  return client.fetchCalendars({
+    props: calendarDiscoveryProps,
+    projectedProps: { currentUserPrivilegeSet: true },
+  });
+}
+
+function writeProviderMetadata(key, value) {
+  try {
+    db.get().prepare(`
+      INSERT INTO sync_config (key, value)
+      VALUES (?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value,
+                                     updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    `).run(key, JSON.stringify(value));
+  } catch (err) {
+    // Focused provider tests and pre-v194 installations may omit sync_config;
+    // metadata remains best-effort there and must not turn a successful sync
+    // into a warning storm.
+    if (!/no such (table|column)/i.test(String(err?.message || ''))) {
+      log.warn(`Could not persist CalDAV provider metadata for ${key}:`, err.message);
+    }
+  }
+}
+
+function persistCalDAVWriteCapability(calendar, accountId = null) {
+  if (!calendar?.url) return;
+  const capability = caldavWriteCapability(calendar);
+  const value = capability.writable === true ? 'write'
+    : capability.writable === false ? 'read' : 'unknown';
+  try {
+    if (accountId == null) {
+      db.get().prepare(`
+        UPDATE caldav_calendar_selection
+        SET write_capability = ?
+        WHERE calendar_url = ?
+      `).run(value, calendar.url);
+    } else {
+      db.get().prepare(`
+        UPDATE caldav_calendar_selection
+        SET write_capability = ?
+        WHERE account_id = ? AND calendar_url = ?
+      `).run(value, accountId, calendar.url);
+    }
+  } catch (err) {
+    if (!/no such (table|column)/i.test(String(err?.message || ''))) {
+      log.warn(`Could not persist CalDAV write capability for ${calendar.url}:`, err.message);
+    }
+  }
+}
+
+function persistCalDAVEventRevision(eventId, etag) {
+  if (!eventId || !etag) return;
+  try {
+    const database = db.get();
+    database.prepare('UPDATE calendar_events SET provider_revision = ? WHERE id = ?')
+      .run(String(etag), eventId);
+    editOperations.clearCalendarEditSyncAfterReadback?.(eventId, 'caldav', database);
+  } catch (err) {
+    if (!/no such (table|column)/i.test(String(err?.message || ''))) {
+      log.warn(`Could not persist CalDAV provider revision for ${eventId}:`, err.message);
+    }
+  }
+}
+
+function readProviderMetadata(key) {
+  try {
+    const value = db.get().prepare('SELECT value FROM sync_config WHERE key = ?').get(key)?.value;
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistCalDAVCalendarMetadata(calendar, accountId = null) {
+  if (!calendar?.url) return;
+  const capability = caldavWriteCapability(calendar);
+  const rawPrivileges = calendar.privilegeSet ?? calendar.privileges ?? calendar.currentUserPrivilegeSet
+    ?? calendar.current_user_privilege_set ?? calendar.projectedProps?.privilegeSet
+    ?? calendar.projectedProps?.currentUserPrivilegeSet
+    ?? calendar.projectedProps?.current_user_privilege_set ?? null;
+  persistCalDAVWriteCapability(calendar, accountId);
+  writeProviderMetadata(caldavCalendarMetaKey(calendar.url), {
+    provider: 'caldav',
+    calendar_url: calendar.url,
+    writable: capability.writable,
+    read_only_reason: capability.reason,
+    privileges: rawPrivileges,
+    observed_at: new Date().toISOString(),
+  });
+}
+
+function persistCalDAVObjectMetadata(calendarUrl, uid, object) {
+  if (!calendarUrl || !uid || !object?.etag) return;
+  writeProviderMetadata(caldavObjectMetaKey(calendarUrl, uid), {
+    provider: 'caldav',
+    calendar_url: calendarUrl,
+    uid,
+    object_url: object.url || null,
+    etag: object.etag,
+    observed_at: new Date().toISOString(),
+  });
+}
+
 // --------------------------------------------------------
 // Credentials Helpers
 // --------------------------------------------------------
@@ -140,7 +272,7 @@ async function testConnection(caldavUrl, username, password, { createClient } = 
     const makeClient = createClient || createCalDAVClient;
     const client = await makeClient({ caldav_url: caldavUrl, username, password });
 
-    const calendars = await client.fetchCalendars();
+    const calendars = await fetchCalendarsWithPrivileges(client);
     if (!calendars.length) {
       throw new Error('Connected, but no calendars found.');
     }
@@ -198,13 +330,24 @@ async function addAccount(name, caldavUrl, username, password, { createClient } 
   for (const cal of eventCalendars(calendars)) {
     const calColor = normalizeCalColor(cal.calendarColor) || '#4A90E2';
     const calName = cal.displayName || 'Unnamed Calendar';
+    persistCalDAVCalendarMetadata(cal, accountId);
+    const capability = caldavWriteCapability(cal);
 
     db.get().prepare(`
       INSERT INTO caldav_calendar_selection (account_id, calendar_url, calendar_name, calendar_color, enabled)
       VALUES (?, ?, ?, ?, 0)
     `).run(accountId, cal.url, calName, calColor);
+    persistCalDAVWriteCapability(cal, accountId);
 
-    calendarData.push({ url: cal.url, name: calName, color: calColor, enabled: false });
+    calendarData.push({
+      url: cal.url,
+      name: calName,
+      color: calColor,
+      enabled: false,
+      writable: capability.writable,
+      readOnly: capability.readOnly,
+      readOnlyReason: capability.reason,
+    });
   }
 
   log.info(`Added CalDAV account "${name}" with ${calendarData.length} calendars.`);
@@ -269,11 +412,13 @@ async function updateAccount(accountId, { name, caldavUrl, username, password, c
       for (const cal of eventCalendars(calendars)) {
         const calColor = normalizeCalColor(cal.calendarColor) || '#4A90E2';
         const calName = cal.displayName || 'Unnamed Calendar';
+        persistCalDAVCalendarMetadata(cal, accountId);
 
         db.get().prepare(`
           INSERT INTO caldav_calendar_selection (account_id, calendar_url, calendar_name, calendar_color, enabled)
           VALUES (?, ?, ?, ?, ?)
         `).run(accountId, cal.url, calName, calColor, (previous.get(cal.url) ?? false) ? 1 : 0);
+        persistCalDAVWriteCapability(cal, accountId);
       }
     }
   }
@@ -371,18 +516,24 @@ async function getCalendars(accountId, { refresh = false, createClient } = {}) {
         .all().map((r) => [r.external_id, r.default_assignee_user_id])
     );
 
-    return calendars.map(cal => ({
-      calendarUrl: cal.calendar_url,
-      calendarName: cal.calendar_name,
-      calendarColor: cal.calendar_color,
-      enabled: cal.enabled === 1,
-      default_assignee_user_id: assigneeMap.get(cal.calendar_url) ?? null,
-      synced: assigneeMap.has(cal.calendar_url),
-      // Die Zahl reist mit der Liste, damit die Rückfrage beim Abwählen sie
-      // sofort nennen kann (#732). Ein eigener Endpunkt dafür wäre ein zweiter
-      // Roundtrip genau in dem Moment, in dem der Nutzer auf eine Antwort wartet.
-      eventCount: countMirroredEvents(db.get(), [cal.calendar_url]),
-    }));
+    return calendars.map(cal => {
+      const metadata = readProviderMetadata(caldavCalendarMetaKey(cal.calendar_url));
+      return {
+        calendarUrl: cal.calendar_url,
+        calendarName: cal.calendar_name,
+        calendarColor: cal.calendar_color,
+        enabled: cal.enabled === 1,
+        writable: metadata?.writable ?? null,
+        readOnly: metadata?.writable === false,
+        readOnlyReason: metadata?.read_only_reason ?? null,
+        default_assignee_user_id: assigneeMap.get(cal.calendar_url) ?? null,
+        synced: assigneeMap.has(cal.calendar_url),
+        // Die Zahl reist mit der Liste, damit die Rückfrage beim Abwählen sie
+        // sofort nennen kann (#732). Ein eigener Endpunkt dafür wäre ein zweiter
+        // Roundtrip genau in dem Moment, in dem der Nutzer auf eine Antwort wartet.
+        eventCount: countMirroredEvents(db.get(), [cal.calendar_url]),
+      };
+    });
   }
 
   // Refresh from server
@@ -407,6 +558,8 @@ async function getCalendars(accountId, { refresh = false, createClient } = {}) {
   for (const cal of eventCalendars(calendars)) {
     const calColor = normalizeCalColor(cal.calendarColor) || '#4A90E2';
     const calName = cal.displayName || 'Unnamed Calendar';
+    persistCalDAVCalendarMetadata(cal, accountId);
+    const capability = caldavWriteCapability(cal);
     // Bekannter Kalender behaelt seinen Stand, ein neu gemeldeter kommt
     // abgewaehlt - dieselbe Opt-in-Regel wie beim Anlegen des Kontos (#732).
     const enabled = previous.get(cal.url) ?? false;
@@ -415,12 +568,16 @@ async function getCalendars(accountId, { refresh = false, createClient } = {}) {
       INSERT INTO caldav_calendar_selection (account_id, calendar_url, calendar_name, calendar_color, enabled)
       VALUES (?, ?, ?, ?, ?)
     `).run(accountId, cal.url, calName, calColor, enabled ? 1 : 0);
+    persistCalDAVWriteCapability(cal, accountId);
 
     result.push({
       calendarUrl: cal.url,
       calendarName: calName,
       calendarColor: calColor,
       enabled,
+      writable: capability.writable,
+      readOnly: capability.readOnly,
+      readOnlyReason: capability.reason,
     });
   }
 
@@ -488,6 +645,155 @@ const YIELD_EVERY = 50;
 /** Echter tsdav-Client für einen Account; in Tests durch eine Factory ersetzbar. */
 const defaultClientFactory = createCalDAVClient;
 
+function scopedOperationCalendarUrl(operation) {
+  const payload = editOperations.parseScopedOperationPayload(operation) || {};
+  const provider = payload.provider || {};
+  return provider.calendarUrl || provider.calendar_url || payload.target_calendar_url
+    || payload.target_calendar_id || operation.target_calendar_url || operation.target_calendar_id
+    || null;
+}
+
+function scopedOperationUid(operation) {
+  const payload = editOperations.parseScopedOperationPayload(operation) || {};
+  const provider = payload.provider || {};
+  const supplied = provider.uid || provider.masterUid || payload.master_external_id
+    || operation.provider_uid || operation.event_external_id || null;
+  if (/::(?:following:)?\d{4}(?:[-]?\d{2}){1,2}/.test(String(supplied || ''))) {
+    const fallback = provider.masterUid || provider.master_uid || payload.master_external_id
+      || operation.event_external_id || null;
+    if (fallback && !/::(?:following:)?\d{4}(?:[-]?\d{2}){1,2}/.test(String(fallback))) return fallback;
+    try {
+      return db.get().prepare(`
+        SELECT parent.external_calendar_id
+        FROM calendar_events child
+        JOIN calendar_events parent ON parent.id = child.exception_of_event_id
+        WHERE child.id = ?
+      `).get(operation.event_id)?.external_calendar_id || null;
+    } catch { return null; }
+  }
+  return supplied;
+}
+
+function scopedCalDAVLocalIdentity(operation) {
+  if (!operation?.event_id) return { event: null, parent: null };
+  try {
+    const event = db.get().prepare(`
+      SELECT id, external_calendar_id, external_object_url, calendar_ref_id,
+             target_caldav_calendar_url, exception_of_event_id
+      FROM calendar_events WHERE id = ?
+    `).get(operation.event_id) || null;
+    const parent = event?.exception_of_event_id
+      ? db.get().prepare(`
+          SELECT id, external_calendar_id, external_object_url, calendar_ref_id,
+                 target_caldav_calendar_url
+          FROM calendar_events WHERE id = ?
+        `).get(event.exception_of_event_id) || null
+      : null;
+    return { event, parent };
+  } catch {
+    return { event: null, parent: null };
+  }
+}
+
+function caldavOperationIdentities(operation) {
+  const payload = editOperations.parseScopedOperationPayload(operation) || {};
+  const provider = payload.provider || payload.remote || {};
+  const local = scopedCalDAVLocalIdentity(operation);
+  const ids = [
+    provider.uid, provider.masterUid, provider.master_uid,
+    payload.master_external_id, payload.provider_uid,
+    operation.provider_uid, operation.provider_event_id, operation.event_external_id,
+    local.event?.external_calendar_id, local.parent?.external_calendar_id,
+    ...(operation.identity?.provider_ids || []),
+  ].filter(Boolean).map(String);
+  const calendarUrl = provider.calendarUrl || provider.calendar_url || payload.target_calendar_url
+    || payload.target_calendar_id || operation.target_calendar_url || operation.target_calendar_id
+    || local.event?.target_caldav_calendar_url || local.parent?.target_caldav_calendar_url || null;
+  return { ids: new Set(ids), calendarUrl };
+}
+
+function caldavUidMatches(left, right) {
+  if (!left || !right) return false;
+  const a = String(left);
+  const b = String(right);
+  return a === b || a.split('::')[0] === b || a === b.split('::')[0];
+}
+
+function activeCalDAVOperationTouches(operation, uid, calendarUrl) {
+  const dependency = operation.payload?.split_reload_dependency;
+  if (dependency) {
+    const parent = db.get().prepare('SELECT external_calendar_id FROM calendar_events WHERE id = ?')
+      .get(dependency.parent_event_id);
+    if (parent?.external_calendar_id === uid) return false;
+  }
+  if (operation.payload?.recovery?.parent_event_id && operation.event_id !== operation.payload.recovery.parent_event_id) {
+    const parent = db.get().prepare('SELECT external_calendar_id FROM calendar_events WHERE id = ?').get(operation.payload.recovery.parent_event_id);
+    if (parent?.external_calendar_id === uid) return false;
+  }
+  const identity = caldavOperationIdentities(operation);
+  if (identity.calendarUrl && calendarUrl && identity.calendarUrl !== calendarUrl) return false;
+  return [...identity.ids].some((id) => caldavUidMatches(id, uid));
+}
+
+function scopedClaim(claim) {
+  if (!claim || typeof claim !== 'object') return null;
+  const token = claim.claim_token ?? claim.claimToken;
+  const generation = claim.claim_generation ?? claim.claimGeneration;
+  if (typeof token !== 'string' || !token || !Number.isSafeInteger(Number(generation))) return null;
+  return { claimToken: token, claimGeneration: Number(generation) };
+}
+
+function completeScopedOperation(id, details, claim) {
+  return editOperations.completeCalendarEditOperation(id, details, db.get(), scopedClaim(claim));
+}
+
+function failScopedOperation(id, error, options, claim) {
+  return editOperations.failCalendarEditOperation(id, error, options, db.get(), scopedClaim(claim));
+}
+
+async function processScopedOperations(client, objectIndex, calendarsByUrl, ownCalendarUrls) {
+  const result = { completed: 0, retry: 0, error: 0, conflict: 0 };
+  for (const operation of editOperations.pendingCalendarEditOperations('caldav', db.get())) {
+    const calendarUrl = scopedOperationCalendarUrl(operation);
+    const uid = scopedOperationUid(operation);
+    const known = uid ? objectIndex.get(uid) : null;
+    // A multi-account run must leave another account's operation untouched.
+    // If no calendar identity was persisted, only the account that fetched the
+    // matching object may claim it.
+    if (calendarUrl && !ownCalendarUrls.has(calendarUrl)) continue;
+    if (!calendarUrl && !known) continue;
+    const claim = editOperations.claimCalendarEditOperation(operation.id, db.get());
+    if (!claim) continue;
+    const claimedOperation = claim;
+    try {
+      const remote = await processScopedOperation(
+        client, claimedOperation, objectIndex, calendarsByUrl, claim,
+      );
+      const completed = completeScopedOperation(claimedOperation.id, remote, claim);
+      if (!completed) continue;
+      result.completed++;
+    } catch (err) {
+      // A fenced worker that lost its lease must leave the replacement worker's
+      // state untouched. The queue helper has already made the row visible to
+      // that worker; reporting this attempt as a failure would be a stale write.
+      if (err?.claimLost) continue;
+      const status = Number(err?.code ?? err?.status ?? err?.response?.status) || null;
+      const conflict = err?.conflict === true || status === 409 || status === 412;
+      const retryable = !conflict && status !== 400 && status !== 403;
+      const failed = failScopedOperation(claimedOperation.id, err, {
+        retryable,
+        ...(err?.providerProgress ? { progress: err.providerProgress } : {}),
+      }, claim);
+      if (!failed) continue;
+      if (conflict) result.conflict++;
+      else if (retryable) result.retry++;
+      else result.error++;
+      log.warn(`Scoped CalDAV operation ${claimedOperation.id} failed: ${err.message}`);
+    }
+  }
+  return result;
+}
+
 async function sync({ createClient } = {}) {
   const accounts = getAllAccounts();
 
@@ -514,6 +820,9 @@ async function sync({ createClient } = {}) {
   );
   // Offene Löschungen einmal je Lauf, nicht je eingehendem Termin.
   const pendingDeletionUids = outbound.pendingDeletionUids('caldav');
+  const activeScopedOperations = typeof editOperations.activeCalendarEditOperations === 'function'
+    ? editOperations.activeCalendarEditOperations('caldav', db.get()) : [];
+  const pendingReadbacks = editOperations.pendingCalendarEditReadbacks('caldav', db.get());
   // Der Vergleich in der WHERE-Klausel hält das Statement von Schreibvorgängen
   // ab, die nichts ändern: ohne ihn meldet SQLite auch bei identischen Werten
   // changes = 1, sodass sich ein Tick über einen unveränderten Kalender nicht
@@ -585,7 +894,7 @@ async function sync({ createClient } = {}) {
       }
 
       // Fetch all calendars from server
-      const serverCalendars = await client.fetchCalendars();
+      const serverCalendars = await fetchCalendarsWithPrivileges(client);
 
       // Inbound sync: CalDAV → Yuvomi
       let accountEventCount = 0;
@@ -630,6 +939,7 @@ async function sync({ createClient } = {}) {
           `).run(account.id, selCal.calendar_url);
           continue;
         }
+        persistCalDAVCalendarMetadata(serverCal, account.id);
 
         // Fetch calendar objects
         let calObjects;
@@ -651,25 +961,59 @@ async function sync({ createClient } = {}) {
 
         // Parse and upsert events
         const calendarUids = new Set();
-        fetchedCalendars.push({ calRefId, calendarName: selCal.calendar_name, calendarUids });
+        const fetched = { calRefId, calendarName: selCal.calendar_name, calendarUrl: selCal.calendar_url, calendarUids,
+          complete: Array.isArray(calObjects) && calObjects.complete === true && !calObjects.partial && !calObjects.incremental };
+        fetchedCalendars.push(fetched);
 
         for (const obj of calObjects) {
           // RECURRENCE-ID-Overrides zusammenführen, sonst überschreibt ein
           // geändertes Einzel-Vorkommen die Serie derselben UID (#549).
           // Was der Parser verwirft, wird benannt: ein still fehlender Termin
           // sah bisher aus wie einer, den der Server nie geliefert hat (#883).
+          let parseComplete = true;
           const parsed = normalizeRecurrenceOverrides(parseICS(obj.data || '', {
-            onSkip: ({ uid, reason }) =>
-              log.warn(`Skipped VEVENT (${reason}) uid=${uid ?? '(none)'} at ${obj.url ?? '(unknown URL)'}`),
+            onSkip: ({ uid, reason }) => {
+              fetched.complete = false;
+              parseComplete = false;
+              log.warn(`Skipped VEVENT (${reason}) uid=${uid ?? '(none)'} at ${obj.url ?? '(unknown URL)'}`);
+            },
           }));
+          if (!parsed.length || !obj.data) fetched.complete = false;
+          for (const event of parsed) calendarUids.add(event.uid);
           if (!parsed.length && !String(obj.data || '').includes('BEGIN:VEVENT')) {
             log.warn(`Calendar object without any VEVENT at ${obj.url ?? '(unknown URL)'}`);
           }
 
+          // A skipped component is not authoritative evidence of deletion.
+          // Keep uncertain identities and local exceptions until the entire
+          // resource can be read, rather than adopting a partial component set.
+          if (!parseComplete) continue;
+
+          try {
+            for (const master of parsed.filter((event) => !event.uid.includes('::'))) {
+              editOperations.reconcileCalendarEditReadback({
+                providerUid: master.uid, providerEtag: obj.etag,
+                providerObjectUrl: obj.url, providerCalendarUrl: selCal.calendar_url,
+                componentIds: parsed.map((event) => event.uid), exdates: master.exdates || [],
+              }, db.get());
+            }
+          } catch (error) {
+            fetched.complete = false;
+            log.error('Could not reconcile uncertain CalDAV readback:', error.message);
+            for (const operation of pendingReadbacks.filter((pending) => (
+              pending.payload.target_calendar_id === selCal.calendar_url
+                && parsed.some((event) => event.uid === pending.progress?.continuation_master?.id)
+            ))) {
+              db.get().prepare("UPDATE calendar_events SET sync_state = 'error', sync_error = ? WHERE id = ?")
+                .run(error.message, operation.event_id);
+            }
+            continue;
+          }
           for (const ev of parsed) {
             try {
               calendarUids.add(ev.uid);
               accountUids.add(ev.uid);
+              persistCalDAVObjectMetadata(selCal.calendar_url, ev.uid, obj);
               // Objekt merken: ausgehende Löschungen brauchen die URL, Änderungen
               // zusätzlich den Originalinhalt zum Patchen (#593).
               if (obj.url) {
@@ -692,9 +1036,16 @@ async function sync({ createClient } = {}) {
 
               const existing = selExistingEvent.get(ev.uid);
 
+              // Preserve the remote ETag even when a local edit is waiting. It
+              // becomes part of the opaque revision and lets the scoped queue
+              // detect a concurrent server change on its next attempt.
+              if (existing?.id) persistCalDAVEventRevision(existing.id, obj.etag);
+
               // Eine lokale Bearbeitung, die noch auf ihren Push wartet, darf der
               // Inbound nicht mit dem alten Serverstand überschreiben (#593).
-              if (existing?.outbound_dirty) {
+              if (existing?.outbound_dirty || activeScopedOperations.some((operation) => (
+                activeCalDAVOperationTouches(operation, ev.uid, selCal.calendar_url)
+              ))) {
                 accountEventCount++;
                 continue;
               }
@@ -724,6 +1075,7 @@ async function sync({ createClient } = {}) {
                 );
                 eventId = Number(inserted.lastInsertRowid);
                 changed = true;
+                persistCalDAVEventRevision(eventId, obj.etag);
                 // Standard-Zuweisung dieses Kalenders (#459) auf den neuen Termin.
                 assignDefaultToEvent(db.get(), eventId, calDefaultAssignee);
               }
@@ -738,6 +1090,7 @@ async function sync({ createClient } = {}) {
                 }
               }
 
+              if (!ev.uid.includes('::')) recoverFollowingCalendarEditAfterReadback(eventId, 'caldav', db.get());
               accountEventCount++;
               if (changed) accountChangedCount++;
             } catch (err) {
@@ -756,10 +1109,23 @@ async function sync({ createClient } = {}) {
       // Löschphase: erst nach allen Kalendern, damit `accountUids` vollständig ist
       // und ein zwischen Kalendern verschobener Termin nicht fälschlich verschwindet.
       let deletedCount = 0;
-      for (const { calRefId, calendarName, calendarUids } of fetchedCalendars) {
+      for (const { calRefId, calendarName, calendarUrl, calendarUids, complete } of fetchedCalendars) {
         try {
+          editOperations.reconcileAbsentCalendarReadbacks(calendarUrl, calendarUids, { complete }, db.get());
+          for (const operation of activeScopedOperations.filter((candidate) => candidate.payload?.split_reload_dependency)) {
+            const parent = db.get().prepare('SELECT external_calendar_id, calendar_ref_id FROM calendar_events WHERE id = ?')
+              .get(operation.payload.split_reload_dependency.parent_event_id);
+            if (complete && parent?.calendar_ref_id === calRefId && !calendarUids.has(parent.external_calendar_id)) {
+              editOperations.retainCalendarRecoveryError([operation], 'recovery_occurrence_missing',
+                'The selected occurrence no longer exists. Review changes and the original series, choose an existing occurrence, or discard unsaved changes.', db.get());
+            }
+          }
           const removed = pruneDeletedEvents(db.get(), {
             calRefId, calendarUids, accountUids, source: 'caldav', calendarName,
+            protectedEventIds: new Set([...activeScopedOperations, ...pendingReadbacks].flatMap((operation) => [
+              operation.event_id, operation.payload?.parent_event_id,
+              ...(operation.payload?.split?.exception_operations || []).map((item) => item.local_event_id),
+            ]).filter(Boolean)),
           });
           if (removed > 0) {
             log.info(`Calendar "${calendarName}": removed ${removed} event(s) deleted on the server.`);
@@ -774,6 +1140,10 @@ async function sync({ createClient } = {}) {
       // Weg zum Objekt für Bestandstermine erst aus dessen Abruf bekannt wird;
       // der Inbound überspringt dafür alles, was hier noch aussteht.
       try {
+        const scoped = await processScopedOperations(client, objectIndex, calendarsByUrl, ownCalendarUrls);
+        if (scoped.completed || scoped.retry || scoped.error || scoped.conflict) {
+          log.info(`Scoped CalDAV edits: ${scoped.completed} completed, ${scoped.retry} retry, ${scoped.error} error, ${scoped.conflict} conflict.`);
+        }
         const removed = await processPendingDeletions(client, 'caldav', objectIndex, ownCalendarUrls);
         if (removed) log.info(`${removed} pending deletion(s) applied on the server.`);
         const pushed = await processPendingUpdates(client, 'caldav', objectIndex, calendarsByUrl);
@@ -830,6 +1200,7 @@ async function sync({ createClient } = {}) {
             UPDATE calendar_events
             SET external_source = 'caldav', external_calendar_id = ?,
                 external_object_url = ?, calendar_ref_id = ?,
+                outbound_dirty = 0, outbound_attempts = 0, outbound_move_to = NULL,
                 color_modified = CASE WHEN color IS NOT NULL THEN 1 ELSE color_modified END
             WHERE id = ?
           `).run(uid, objectUrl, calRefId, event.id);
@@ -891,7 +1262,14 @@ async function flushOutbound({ createClient } = {}) {
   const idle = { deleted: 0, updated: 0 };
   const deletions = outbound.pendingDeletions('caldav');
   const updates   = outbound.pendingUpdates('caldav');
-  if (!deletions.length && !updates.length) return idle;
+  const hasScoped = editOperations.pendingCalendarEditOperations('caldav', db.get()).length > 0;
+  if (!deletions.length && !updates.length) {
+    // Scoped edits need the fetched source object and calendar ACL metadata;
+    // let the normal sync path resolve both rather than claiming that an
+    // immediate attempt happened without touching the provider.
+    if (hasScoped) await sync({ createClient });
+    return idle;
+  }
 
   const conn = db.get();
   const accountForCalendar = conn.prepare(
@@ -925,7 +1303,10 @@ async function flushOutbound({ createClient } = {}) {
     if (event.outbound_move_to) b.needsCalendars = true;
   }
 
-  if (buckets.size === 0) return idle;
+  if (buckets.size === 0) {
+    if (hasScoped) await sync({ createClient });
+    return idle;
+  }
 
   const makeClient = createClient || defaultClientFactory;
   const total = { deleted: 0, updated: 0 };
@@ -941,6 +1322,9 @@ async function flushOutbound({ createClient } = {}) {
       // Unkritisch: alles bleibt vorgemerkt, der nächste Sync-Lauf zieht nach.
       log.warn(`Immediate outbound attempt failed for account ${accountId}: ${err.message}`);
     }
+  }
+  if (hasScoped && editOperations.pendingCalendarEditOperations('caldav', db.get()).length) {
+    await sync({ createClient });
   }
   return total;
 }
@@ -988,10 +1372,11 @@ export {
   countAccountEvents,
   sync,
   flushOutbound,
+  processScopedOperations,
   getStatus
 };
 
 // Nur fuer Tests: der ICS-Builder ist der einzige Weg, auf dem ein rein lokaler
 // Termin zum Anbieter kommt, und der Sync-Pfad drumherum ist zu gross, um ihn
 // dafuer nachzustellen.
-export const __test = { buildCalDAVICS };
+export const __test = { buildCalDAVICS, processScopedOperations };

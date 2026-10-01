@@ -453,6 +453,15 @@ export const schemas = {
           description: 'Calendar event. New attachments use document URLs; attachment_data remains available for legacy stored blobs.',
           properties: {
             id: { type: 'integer' },
+            revision: {
+              type: 'string',
+              description: 'Opaque optimistic-concurrency token. Clients must echo the exact value in expected_revision.',
+            },
+            edit_capabilities: { $ref: '#/components/schemas/CalendarEditCapabilities' },
+            sync: { $ref: '#/components/schemas/CalendarSyncMetadata' },
+            exception_summary: { $ref: '#/components/schemas/CalendarExceptionSummary' },
+            original_occurrence_start: { type: ['string', 'null'] },
+            recurrence_parent: { $ref: '#/components/schemas/CalendarRecurrenceParent' },
             title: { type: 'string' },
             color: {
               type: ['string', 'null'],
@@ -487,8 +496,111 @@ export const schemas = {
           type: 'object',
           properties: {
             data: { $ref: '#/components/schemas/CalendarEvent' },
+            edit: { $ref: '#/components/schemas/CalendarEditResult' },
           },
           required: ['data'],
+        },
+        CalendarEditCapabilities: {
+          type: 'object',
+          required: ['editable', 'read_only', 'provider', 'scopes', 'move', 'resize'],
+          properties: {
+            editable: { type: 'boolean' },
+            read_only: { type: 'boolean' },
+            read_only_reason: { type: ['string', 'null'] },
+            scope_reason: { type: ['string', 'null'] },
+            provider: { type: 'string', enum: ['local', 'google', 'caldav', 'apple', 'ics'] },
+            scopes: {
+              type: 'object',
+              required: ['this', 'following', 'series'],
+              properties: {
+                this: { type: 'boolean' },
+                following: { type: 'boolean' },
+                series: { type: 'boolean' },
+              },
+            },
+            move: { type: 'boolean' },
+            resize: { type: 'boolean' },
+          },
+        },
+        CalendarSyncMetadata: {
+          type: 'object',
+          required: ['state', 'operation_id', 'source', 'error', 'attempts', 'retryable'],
+          properties: {
+            state: { type: 'string', enum: ['clean', 'pending', 'error'] },
+            operation_id: { type: ['integer', 'null'] },
+            source: { type: ['string', 'null'], enum: ['google', 'caldav', 'apple', null] },
+            error: { type: ['string', 'null'] },
+            attempts: { type: 'integer', minimum: 0 },
+            retryable: { type: 'boolean' },
+            conflict: { type: 'boolean', description: 'True when an explicit Reload is required after a provider 409/412 conflict.' },
+            progress: { type: ['object', 'null'], additionalProperties: true },
+            failure_kind: { type: ['string', 'null'] },
+            recovery: { type: ['object', 'null'], additionalProperties: true,
+              description: 'Retained changes, original parent identity and conflicting local/provider field values. Recovery errors are nonretryable and offer review or local discard.' },
+          },
+        },
+        CalendarExceptionSummary: {
+          type: 'object',
+          required: ['known', 'count', 'items', 'truncated'],
+          properties: {
+            known: { type: 'boolean' },
+            count: { type: 'integer', minimum: 0 },
+            items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                required: ['original_start', 'current_start', 'state'],
+                properties: {
+                  original_start: { type: 'string' },
+                  current_start: { type: ['string', 'null'] },
+                  original_end: { type: ['string', 'null'] },
+                  current_end: { type: ['string', 'null'] },
+                  state: { type: 'string' },
+                },
+              },
+            },
+            truncated: { type: 'boolean' },
+          },
+        },
+        CalendarEditResult: {
+          type: 'object',
+          required: ['scope', 'event_ids', 'operation_ids', 'sync'],
+          properties: {
+            scope: { type: 'string', enum: ['this', 'following', 'series'] },
+            event_ids: { type: 'array', items: { type: 'integer' } },
+            operation_ids: { type: 'array', items: { type: 'integer' } },
+            sync: { $ref: '#/components/schemas/CalendarSyncMetadata' },
+          },
+        },
+        CalendarEditContextResponse: {
+          type: 'object',
+          required: ['data'],
+          properties: {
+            data: {
+              type: 'object',
+              required: ['id', 'revision', 'edit_capabilities', 'exception_summary', 'sync'],
+              properties: {
+                id: { type: 'integer' },
+                revision: { type: 'string' },
+                edit_capabilities: { $ref: '#/components/schemas/CalendarEditCapabilities' },
+                exception_summary: { $ref: '#/components/schemas/CalendarExceptionSummary' },
+                sync: { $ref: '#/components/schemas/CalendarSyncMetadata' },
+                original_occurrence_start: { type: ['string', 'null'] },
+                recurrence_parent: { $ref: '#/components/schemas/CalendarRecurrenceParent' },
+              },
+            },
+          },
+        },
+        CalendarRecurrenceParent: {
+          type: 'object',
+          required: ['id', 'revision', 'start_datetime', 'end_datetime', 'recurrence_rule'],
+          properties: {
+            id: { type: 'integer' },
+            revision: { type: 'string' },
+            start_datetime: { type: ['string', 'null'] },
+            end_datetime: { type: ['string', 'null'] },
+            recurrence_rule: { type: ['string', 'null'] },
+          },
         },
         CalendarEventsResponse: {
           type: 'object',

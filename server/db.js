@@ -7601,6 +7601,125 @@ const MIGRATIONS = [
       CREATE INDEX idx_shopping_items_store ON shopping_items(store_id);
     `,
   },
+  {
+    version: 194,
+    description: 'Calendar: authoritative scoped edits, revisions, and provider work queue',
+    up: `
+      -- Scoped calendar edits need a monotonic token that is independent of the
+      -- second-resolution updated_at timestamp.  The token is serialized as an
+      -- opaque string by the API and is checked before a gesture or editor save.
+      ALTER TABLE calendar_events ADD COLUMN edit_revision INTEGER NOT NULL DEFAULT 1;
+      ALTER TABLE calendar_events ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'clean'
+        CHECK(sync_state IN ('clean', 'pending', 'error'));
+      ALTER TABLE calendar_events ADD COLUMN sync_error TEXT;
+      -- Provider identity from the last successful fetch.  It participates in
+      -- the API revision token so a remote edit cannot be overwritten by a
+      -- stale scoped gesture.
+      ALTER TABLE calendar_events ADD COLUMN provider_revision TEXT;
+
+      -- A detached occurrence remains a normal calendar event so the existing
+      -- expansion/list code can render it.  These columns retain the parent and
+      -- original identity without putting provider-specific IDs in the core API.
+      ALTER TABLE calendar_events ADD COLUMN exception_of_event_id INTEGER
+        REFERENCES calendar_events(id) ON DELETE CASCADE;
+      ALTER TABLE calendar_events ADD COLUMN exception_original_start TEXT;
+      ALTER TABLE calendar_events ADD COLUMN exception_original_end TEXT;
+      CREATE INDEX IF NOT EXISTS idx_calendar_exception_parent
+        ON calendar_events(exception_of_event_id)
+        WHERE exception_of_event_id IS NOT NULL;
+
+      -- A selected calendar is not necessarily writable.  Providers refresh
+      -- this capability from the server's per-calendar rights metadata; an
+      -- unknown value is intentionally treated as unavailable by edit routes.
+      ALTER TABLE caldav_calendar_selection ADD COLUMN write_capability TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(write_capability IN ('unknown', 'read', 'write'));
+      ALTER TABLE google_calendar_selection ADD COLUMN access_role TEXT;
+
+      -- Inbound/provider writes also advance the token.  Route writes may set a
+      -- new token explicitly; the WHEN guard prevents this trigger from adding a
+      -- second increment.  The existing updated_at trigger may issue a second
+      -- UPDATE, but it carries the already incremented token and is ignored.
+      CREATE TRIGGER IF NOT EXISTS trg_calendar_events_edit_revision
+        AFTER UPDATE OF title, description, start_datetime, end_datetime, all_day,
+          location, color, icon, assigned_to, created_by, external_calendar_id,
+          external_source, recurrence_rule, subscription_id, user_modified,
+          color_modified, calendar_ref_id, attachment_name, attachment_mime,
+          attachment_size, attachment_data, attachment_document_id,
+          target_caldav_account_id, target_caldav_calendar_url,
+          target_google_calendar_id, target_outlook_account_id,
+          target_outlook_calendar_id, visibility, tzid, outbound_dirty,
+          outbound_attempts, outbound_move_to, external_object_url, countdown,
+          sync_state, sync_error, provider_revision, exception_of_event_id,
+          exception_original_start, exception_original_end
+        ON calendar_events FOR EACH ROW
+        WHEN NEW.edit_revision = OLD.edit_revision
+        BEGIN
+          UPDATE calendar_events
+             SET edit_revision = OLD.edit_revision + 1
+           WHERE id = OLD.id;
+        END;
+
+      -- Durable provider work for scoped edits.  The payload is a complete,
+      -- provider-neutral before/after snapshot; adapters resolve the provider
+      -- operation and may retry without changing the local event again.
+      CREATE TABLE IF NOT EXISTS calendar_edit_operations (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id          INTEGER REFERENCES calendar_events(id) ON DELETE SET NULL,
+        source            TEXT NOT NULL CHECK(source IN ('google', 'caldav', 'apple')),
+        scope             TEXT NOT NULL CHECK(scope IN ('this', 'following', 'series')),
+        operation         TEXT NOT NULL DEFAULT 'scoped_edit',
+        occurrence_start  TEXT,
+        payload_json      TEXT NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'pending'
+                          CHECK(status IN ('pending', 'processing', 'retry', 'error', 'completed')),
+        attempts          INTEGER NOT NULL DEFAULT 0,
+        last_error        TEXT,
+        created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+        claimed_at        TEXT,
+        claim_expires_at  TEXT,
+        retryable         INTEGER NOT NULL DEFAULT 1 CHECK(retryable IN (0, 1)),
+        completed_at      TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_calendar_edit_operations_pending
+        ON calendar_edit_operations(source, status, id);
+      CREATE INDEX IF NOT EXISTS idx_calendar_edit_operations_event
+        ON calendar_edit_operations(event_id, status, id);
+      CREATE TRIGGER IF NOT EXISTS trg_calendar_edit_operations_updated_at
+        AFTER UPDATE ON calendar_edit_operations FOR EACH ROW
+        WHEN NEW.updated_at = OLD.updated_at
+        BEGIN
+          UPDATE calendar_edit_operations
+             SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+           WHERE id = OLD.id;
+        END;
+    `,
+  },
+  {
+    version: 195,
+    description: 'Calendar: fenced provider leases, durable progress, and conflict resolution',
+    up: `
+      -- A lease token and generation fence make late provider workers harmless
+      -- after recovery has handed the operation to a newer worker.
+      ALTER TABLE calendar_edit_operations ADD COLUMN claim_token TEXT;
+      ALTER TABLE calendar_edit_operations ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0;
+
+      -- Following edits can span several conditional provider requests.  Keep
+      -- the accepted identities in the queue so retry resumes without a new
+      -- continuation insert.
+      ALTER TABLE calendar_edit_operations ADD COLUMN progress_json TEXT;
+      ALTER TABLE calendar_edit_operations ADD COLUMN progress_updated_at TEXT;
+
+      -- A conflict remains an audit row, but an explicit Reload releases the
+      -- inbound guard without pretending that the stale local edit succeeded.
+      ALTER TABLE calendar_edit_operations ADD COLUMN failure_kind TEXT;
+      ALTER TABLE calendar_edit_operations ADD COLUMN resolution TEXT;
+
+      CREATE INDEX IF NOT EXISTS idx_calendar_edit_operations_claim
+        ON calendar_edit_operations(status, claim_expires_at, claim_generation);
+    `,
+  },
 ];
 
 /**

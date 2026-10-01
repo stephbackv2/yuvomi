@@ -15,7 +15,7 @@ import { esc, fmtLocation } from '/utils/html.js';
 import { shiftEndDateKey, isEndBeforeStart, weekStartIndex, weekdayOrder,
          monthPeriodKeys, startOfLocalWeekKey, addLocalDays, defaultDateInPeriod,
          isWeekendKey } from '/utils/date.js';
-import { truncateRuleBefore, shiftSeriesStart, shiftEndForStart, followingMeansWholeSeries,
+import { truncateRuleBefore, followingMeansWholeSeries,
          isLocalRecurringSeries, isExternalRecurringSeries } from '/utils/recurrence-scope.js';
 import { getReadableTextColor } from '/utils/color.js';
 import { resolveEventColor } from '/utils/event-color.js';
@@ -35,6 +35,32 @@ import { googleTargetValue, caldavTargetValue, outlookTargetValue } from '/utils
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { findPageFab } from '/utils/fab.js';
 import { nowFields, todayKey, zonedDateKey, zonedTimeKey } from '/utils/timezone.js';
+import {
+  CALENDAR_MIN_TIMED_MINUTES,
+  CALENDAR_SNAP_MINUTES,
+  civilMinute,
+  civilParts,
+  dayDifference,
+  directEditBody,
+  editBlockReason,
+  editCapabilities,
+  eventRange,
+  eventOccurrenceStart,
+  eventRevision,
+  exceptionSummary,
+  isDetachedEvent,
+  isConflictError,
+  isEditAllowed,
+  isRecurringEvent,
+  moveEventRange,
+  previewEvent,
+  recurrenceParent,
+  recurrenceParentRevision,
+  resizeEventRange,
+  responseEvent,
+  scopedRecurrencePayload,
+  syncMetadata,
+} from '/utils/calendar-edit.js';
 import { maxUploadBytes, maxUploadMb } from '/utils/upload-limit.js';
 import { emptyStateHTML, emptyHintHTML, mountLoadError } from '/utils/empty-state.js';
 import {
@@ -620,9 +646,23 @@ let state = {
   // `assigned_users`, ihre Farbe gehoert ihr, und in einem FAMILIENplaner ist
   // „wessen Termin ist das" die Frage, die der Filter beantworten soll.
   people:        new Set(),
+  // Direct manipulation lives in page state so a period change can replace
+  // the calendar DOM without losing the active gesture.
+  dragPreview:   null,
+  dragNotice:    null,
 };
 let _container = null;
 const calendarLoads = createCalendarLoadCoordinator();
+
+let _activeCalendarGesture = null;
+let _calendarGestureListeners = false;
+let _gestureRenderRaf = 0;
+let _gestureEdgeTimer = 0;
+let _gestureEdgeRepeat = 0;
+let _gestureEdgeDirection = 0;
+let _gestureScrollTimer = 0;
+let _gestureScrollDirection = 0;
+let _suppressCalendarClickUntil = 0;
 
 // Termin-Suche (#471): datumsunabhängiges Finden über den FTS-Index. Der
 // Suchmodus blendet eine Leiste unter der Toolbar ein und ersetzt den Ansichts-
@@ -973,7 +1013,8 @@ function buildDayIndex() {
   // identisch zum bisherigen .filter()-Verhalten bleibt.
   const lo = state.rangeFrom || '';
   const hi = state.rangeTo   || '';
-  for (const e of state.events) {
+  for (const source of state.events) {
+    const e = displayCalendarEvent(source);
     const start = localDate(e.start_datetime);
     const end   = eventEndDate(e);
     // Auf das geladene Fenster klammern, damit mehrtägige/fehlerhafte Events
@@ -1044,6 +1085,13 @@ function passesPersonFilters(item) {
   return belongsToMe(item) && matchesPeopleFilter(item);
 }
 
+function displayCalendarEvent(event) {
+  if (!event || !state.dragPreview || Number(state.dragPreview.id) !== Number(event.id)) {
+    return event;
+  }
+  return previewEvent(event, state.dragPreview.range);
+}
+
 /** Wie viele Filter gerade etwas wegnehmen - die Zahl am Filterknopf. */
 function activeFilterCount() {
   let n = 0;
@@ -1081,7 +1129,7 @@ function hasBirthdayEvents() {
 function eventsOnDay(dateStr) {
   const list = _dayIndex.active
     ? (_dayIndex.events.get(dateStr) ?? [])
-    : state.events.filter((e) => {
+    : state.events.map(displayCalendarEvent).filter((e) => {
         const start = localDate(e.start_datetime);
         const end   = eventEndDate(e);
         return start <= dateStr && end >= dateStr;
@@ -1327,7 +1375,7 @@ async function openTaskFromCalendar(taskId) {
  * gelesen: ein Delete-Commit kann genau während eines Navigations-Loads fällig
  * werden, und dann gehört die autoritative Antwort bereits zum neuen Cursor.
  */
-async function reloadCalendarEventsOnly() {
+async function reloadCalendarEventsOnly({ throwOnError = false } = {}) {
   try {
     const { from, to } = getRangeForView(state.view, state.cursor);
     const selection = { view: state.view, cursor: state.cursor, from, to };
@@ -1350,7 +1398,10 @@ async function reloadCalendarEventsOnly() {
     );
   } catch (err) {
     console.error('[Calendar] reloadCalendarEventsOnly Fehler:', err);
+    if (throwOnError) throw err;
+    return false;
   }
+  return true;
 }
 
 /**
@@ -1403,6 +1454,7 @@ async function loadUsers() {
 
 export async function render(container, { user }) {
   _container = container;
+  ensureCalendarGestureListeners();
   // Die Uhr des Haushalts: state.today markiert die Heute-Zelle, die Jetzt-Linie
   // und den Vorschlag fuer einen neuen Termin - alle drei muessen denselben Tag
   // meinen wie die Termine daneben (#829 Teil 3).
@@ -1930,6 +1982,547 @@ function scheduleMonthFit(grid) {
   });
 }
 
+// --------------------------------------------------------
+// Direct calendar manipulation
+// --------------------------------------------------------
+
+/*
+ * Gesture handling is delegated from the document because renderView replaces
+ * the grid on every preview frame and while period auto-navigation is loading.
+ * The active gesture stores the source event and civil range, so DOM replacement
+ * never changes what is being edited.
+ */
+function ensureCalendarGestureListeners() {
+  if (_calendarGestureListeners) return;
+  _calendarGestureListeners = true;
+
+  document.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.pointerType === 'touch') return;
+    const element = calendarEventElement(event.target);
+    const source = eventFromElement(element);
+    if (!element || !source || state.view === 'agenda') return;
+
+    const handle = event.target.closest?.('[data-resize-edge]');
+    const action = handle ? 'resize' : 'move';
+    const sourceRange = eventRange(source);
+    if (!sourceRange) return;
+    // Month cells expose horizontal handles for all-day spans. Timed events
+    // have no meaningful month-grid edge to resize, so keep those handles
+    // inert while allowing inclusive all-day date resizing.
+    if (action === 'resize' && gestureViewForElement(element) === 'month' && !sourceRange.allDay) return;
+    if (!isEditAllowed(source, action)) {
+      showCalendarEditBlocked(source);
+      return;
+    }
+
+    const allDaySpan = gestureIsAllDaySpan(element);
+    const timeColumn = element.closest('.week-view__col, .day-view__col');
+    const scrollElement = element.closest('.week-view__scroll, .day-view__scroll');
+    _activeCalendarGesture = {
+      pointerId: event.pointerId,
+      source,
+      sourceRange,
+      element,
+      action,
+      edge: handle?.dataset.resizeEdge || null,
+      allDaySpan,
+      startX: event.clientX,
+      startY: event.clientY,
+      hourHeight: measuredHourHeight(timeColumn),
+      scrollElement,
+      startScrollTop: scrollElement?.scrollTop || 0,
+      grabOffsetMinutes: gestureGrabOffset(event, element, sourceRange, allDaySpan),
+      started: false,
+      range: sourceRange,
+      target: null,
+      periodLoading: false,
+    };
+    element.setPointerCapture?.(event.pointerId);
+  }, { capture: true });
+
+  document.addEventListener('pointermove', (event) => {
+    const gesture = _activeCalendarGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+
+    const moved = Math.hypot(event.clientX - gesture.startX, event.clientY - gesture.startY) >= 4;
+    if (!gesture.started && !moved) return;
+    if (!gesture.started) {
+      gesture.started = true;
+      _suppressCalendarClickUntil = Date.now() + 500;
+      gesture.element.classList.add('is-calendar-dragging');
+      document.body.classList.add('is-calendar-gesture');
+    }
+
+    const target = calendarDropTarget(event);
+    gesture.lastPointer = { clientX: event.clientX, clientY: event.clientY };
+    updateGesturePreview(gesture, target, gesture.lastPointer);
+    updateGestureEdge(event);
+    updateGestureAutoScroll(event);
+    event.preventDefault();
+  }, { capture: true });
+
+  document.addEventListener('pointerup', (event) => {
+    const gesture = _activeCalendarGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    finishCalendarGesture(gesture);
+  }, { capture: true });
+
+  document.addEventListener('pointercancel', (event) => {
+    const gesture = _activeCalendarGesture;
+    if (!gesture || gesture.pointerId !== event.pointerId) return;
+    cancelCalendarGesture(gesture);
+  }, { capture: true });
+
+  document.addEventListener('click', (event) => {
+    if (Date.now() >= _suppressCalendarClickUntil) return;
+    // Suppress the click generated by a completed drag so the source event
+    // does not open its detail sheet. A recurring drag opens its scope modal
+    // on pointerup, though, and a fast Cancel must remain clickable.
+    if (!event.target.closest?.('#calendar-page')
+        || event.target.closest?.('.modal-overlay, [role="dialog"]')) return;
+    event.preventDefault();
+    event.stopPropagation();
+  }, { capture: true });
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && _activeCalendarGesture) {
+      event.preventDefault();
+      cancelCalendarGesture(_activeCalendarGesture);
+    }
+  }, { capture: true });
+}
+
+function calendarEventElement(target) {
+  return target?.closest?.('[data-calendar-direct-event]') || null;
+}
+
+function eventFromElement(element) {
+  const id = element?.dataset?.id;
+  if (id == null) return null;
+  return state.events.find((event) => String(event.id) === String(id)) || null;
+}
+
+function gestureViewForElement(element) {
+  if (element?.closest('.month-view')) return 'month';
+  if (element?.closest('.week-view')) return 'week';
+  if (element?.closest('.day-view')) return 'day';
+  return state.view;
+}
+
+function gestureIsAllDaySpan(element) {
+  return Boolean(element?.closest('.month-day, .allday-cell'));
+}
+
+function showCalendarEditBlocked(event) {
+  const reason = editBlockReason(event);
+  window.yuvomi?.showToast(
+    t('calendar.editReadOnly', { reason: reason || t('calendar.editReadOnlyReason') }),
+    'warning',
+  );
+}
+
+function gestureGrabOffset(event, element, range, allDaySpan) {
+  if (allDaySpan) {
+    const cell = element.closest('.month-day, .allday-cell');
+    const cellDate = cell?.dataset?.date;
+    return cellDate && range.startDate
+      ? Math.max(0, dayDifference(range.startDate, cellDate)) * 24 * 60
+      : 0;
+  }
+  const rect = element.getBoundingClientRect();
+  const height = measuredHourHeight(element.closest('.week-view__col, .day-view__col') || element.parentElement);
+  if (!height || !Number.isFinite(rect.top)) return 0;
+  const minutes = ((event.clientY - rect.top) / height) * 60;
+  return Math.max(0, Math.min(range.durationMinutes - CALENDAR_MIN_TIMED_MINUTES, minutes));
+}
+
+function calendarDropTarget(event) {
+  if (!event) return null;
+  const hovered = document.elementFromPoint(event.clientX, event.clientY);
+  const monthDay = hovered?.closest?.('.month-day[data-date]');
+  if (monthDay) return { kind: 'all-day', date: monthDay.dataset.date };
+
+  const allDayCell = hovered?.closest?.('.allday-cell[data-date]');
+  if (allDayCell) return { kind: 'all-day', date: allDayCell.dataset.date };
+
+  const column = hovered?.closest?.('.week-view__col[data-date], .day-view__col[data-date]');
+  if (!column) return null;
+  const rect = column.getBoundingClientRect();
+  const height = measuredHourHeight(column);
+  if (!height) return null;
+  const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+  const minutes = Math.min(
+    24 * 60 - CALENDAR_SNAP_MINUTES,
+    Math.max(0, Math.round((y / height) * 60 / CALENDAR_SNAP_MINUTES) * CALENDAR_SNAP_MINUTES),
+  );
+  const parts = civilParts(civilMinute(column.dataset.date, '00:00') + minutes);
+  return { kind: 'grid', date: column.dataset.date, time: parts.time };
+}
+
+function updateGesturePreview(gesture, target = calendarDropTarget(gesture.lastPointer), pointer = gesture.lastPointer) {
+  if (!gesture) return;
+  gesture.target = target;
+  const range = gestureRangeAtTarget(gesture, target, pointer);
+  if (!range) return;
+  gesture.range = range;
+  state.dragPreview = { id: gesture.source.id, range };
+  scheduleGestureRender();
+}
+
+function gestureRangeAtTarget(gesture, target, pointerEvent = null) {
+  if (!target?.date) return null;
+  if (gesture.action === 'resize') {
+    let resizeTarget = target;
+    if (!gesture.allDaySpan && target.kind === 'grid' && pointerEvent && gesture.hourHeight) {
+      const currentScroll = _container?.querySelector('.week-view__scroll, .day-view__scroll');
+      const scrollDelta = (currentScroll?.scrollTop || 0) - gesture.startScrollTop;
+      const deltaMinutes = Math.round(
+        (((pointerEvent.clientY - gesture.startY) + scrollDelta) / gesture.hourHeight) * 60 / CALENDAR_SNAP_MINUTES,
+      ) * CALENDAR_SNAP_MINUTES;
+      const anchor = gesture.edge === 'start'
+        ? gesture.sourceRange.startMinute
+        : gesture.sourceRange.endMinute;
+      resizeTarget = { ...target, time: civilParts(anchor + deltaMinutes).time };
+    }
+    return resizeEventRange(gesture.source, gesture.edge, resizeTarget, { allDaySpan: gesture.allDaySpan });
+  }
+  const monthTimedMove = !gesture.sourceRange.allDay
+    && gestureViewForElement(gesture.element) === 'month'
+    && target.kind === 'all-day';
+  const moveTarget = monthTimedMove
+    ? { ...target, kind: 'grid', time: gesture.sourceRange.startTime }
+    : target;
+  return moveEventRange(gesture.source, moveTarget, {
+    // A timed event has no vertical month-grid coordinate, but a multi-day
+    // timed event still has a meaningful horizontal segment offset. Keeping it
+    // here makes a grabbed middle segment remain the segment under the pointer
+    // after the month move while the original wall-clock time is preserved.
+    grabOffsetMinutes: gesture.grabOffsetMinutes,
+    targetKind: moveTarget.kind,
+  });
+}
+
+function scheduleGestureRender() {
+  if (_gestureRenderRaf) return;
+  const renderFrame = () => {
+    _gestureRenderRaf = 0;
+    if (!_activeCalendarGesture || !state.dragPreview) return;
+    renderView();
+  };
+  if (typeof requestAnimationFrame === 'function') {
+    _gestureRenderRaf = requestAnimationFrame(renderFrame);
+  } else {
+    _gestureRenderRaf = setTimeout(renderFrame, 0);
+  }
+}
+
+function clearGestureEdgeTimers() {
+  if (_gestureEdgeTimer) clearTimeout(_gestureEdgeTimer);
+  if (_gestureEdgeRepeat) clearInterval(_gestureEdgeRepeat);
+  _gestureEdgeTimer = 0;
+  _gestureEdgeRepeat = 0;
+  _gestureEdgeDirection = 0;
+}
+
+function clearGestureScrollTimer() {
+  if (_gestureScrollTimer) clearInterval(_gestureScrollTimer);
+  _gestureScrollTimer = 0;
+  _gestureScrollDirection = 0;
+}
+
+function clearGestureTimers() {
+  clearGestureEdgeTimers();
+  clearGestureScrollTimer();
+}
+
+function updateGestureEdge(event) {
+  const page = _container?.querySelector('#calendar-page');
+  if (!page || !_activeCalendarGesture?.started) return;
+  const edge = 40;
+  const rect = page.getBoundingClientRect();
+  const direction = event.clientX <= rect.left + edge ? -1
+    : event.clientX >= rect.right - edge ? 1
+      : 0;
+  if (direction === _gestureEdgeDirection) return;
+  clearGestureEdgeTimers();
+  if (!direction) {
+    updateGestureNotice();
+    return;
+  }
+  _gestureEdgeDirection = direction;
+  _gestureEdgeTimer = setTimeout(() => {
+    advanceGesturePeriod(direction);
+    _gestureEdgeRepeat = setInterval(() => advanceGesturePeriod(direction), 700);
+  }, 700);
+  updateGestureNotice();
+}
+
+function updateGestureAutoScroll(event) {
+  const scroll = _container?.querySelector('.week-view__scroll, .day-view__scroll');
+  if (!scroll) {
+    clearGestureScrollTimer();
+    return;
+  }
+  const rect = scroll.getBoundingClientRect();
+  const threshold = 48;
+  const direction = event.clientY <= rect.top + threshold ? -1
+    : event.clientY >= rect.bottom - threshold ? 1
+      : 0;
+  if (direction === _gestureScrollDirection) return;
+  clearGestureScrollTimer();
+  if (!direction) return;
+  _gestureScrollDirection = direction;
+  const scrollStep = () => {
+    if (!_activeCalendarGesture?.started) return;
+    scroll.scrollTop += direction * 18;
+    const gesture = _activeCalendarGesture;
+    if (gesture.lastPointer) updateGesturePreview(gesture);
+  };
+  scrollStep();
+  _gestureScrollTimer = setInterval(scrollStep, 50);
+}
+
+async function advanceGesturePeriod(direction) {
+  const gesture = _activeCalendarGesture;
+  if (!gesture || gesture.periodLoading) return;
+  gesture.periodLoading = true;
+  if (state.view === 'month') state.cursor = addMonths(state.cursor, direction);
+  else if (state.view === 'week') {
+    const isMobile = window.matchMedia(MOBILE_MEDIA_QUERY).matches;
+    state.cursor = addDays(state.cursor, direction * (isMobile ? 3 : 7));
+  } else if (state.view === 'day') state.cursor = addDays(state.cursor, direction);
+  else {
+    gesture.periodLoading = false;
+    return;
+  }
+  try {
+    await reloadForView();
+    updateLabel();
+    renderView();
+    if (_activeCalendarGesture === gesture && gesture.lastPointer) {
+      updateGesturePreview(gesture);
+    }
+  } finally {
+    gesture.periodLoading = false;
+  }
+}
+
+function updateGestureNotice() {
+  const page = _container?.querySelector('#calendar-page');
+  if (!page) return;
+  let notice = page.querySelector('.calendar-drag-notice');
+  if (!_activeCalendarGesture?.started || !_gestureEdgeDirection) {
+    notice?.remove();
+    return;
+  }
+  if (!notice) {
+    notice = document.createElement('div');
+    notice.className = 'calendar-drag-notice';
+    notice.setAttribute('role', 'status');
+    page.append(notice);
+  }
+  notice.textContent = _gestureEdgeDirection < 0
+    ? t('calendar.dragNavigatePrevious')
+    : t('calendar.dragNavigateNext');
+}
+
+function cancelCalendarGesture(gesture) {
+  clearGestureTimers();
+  gesture?.element?.classList.remove('is-calendar-dragging');
+  document.body.classList.remove('is-calendar-gesture');
+  state.dragPreview = null;
+  _activeCalendarGesture = null;
+  updateGestureNotice();
+  if (gesture?.started) renderView();
+}
+
+async function finishCalendarGesture(gesture) {
+  clearGestureTimers();
+  gesture?.element?.classList.remove('is-calendar-dragging');
+  document.body.classList.remove('is-calendar-gesture');
+  _activeCalendarGesture = null;
+  updateGestureNotice();
+  if (!gesture?.started || !gesture.range || !gesture.target) {
+    state.dragPreview = null;
+    return;
+  }
+  state.dragPreview = null;
+  renderView();
+
+  const scope = isRecurringEvent(gesture.source)
+    ? await recurringEditChoice(gesture.source)
+    : 'series';
+  if (!scope) return;
+  await saveCalendarGesture(gesture, scope);
+}
+
+async function saveCalendarGesture(gesture, scope) {
+  const body = directEditBody(gesture.source, gesture.range, { scope });
+  if (!body) return;
+  body.edit_action = gesture.action === 'move' ? 'move' : 'resize';
+  try {
+    const response = await api.put('/calendar/' + gesture.source.id, body);
+    const updated = responseEvent(response);
+    if (updated) {
+      const index = state.events.findIndex((event) => String(event.id) === String(updated.id));
+      if (index !== -1) state.events[index] = updated;
+    }
+    let refreshError = null;
+    try {
+      await reloadCalendarEventsOnly({ throwOnError: true });
+    } catch (error) {
+      refreshError = error;
+    }
+    await refreshReminders();
+    renderView();
+    if (refreshError) {
+      window.yuvomi?.showToast(t('calendar.loadError'), 'danger');
+      return;
+    }
+    const sync = syncMetadata(updated || gesture.source);
+    if (sync.state === 'error') {
+      window.yuvomi?.showToast(t('calendar.syncError'), 'danger');
+    } else if (sync.state === 'pending') {
+      window.yuvomi?.showToast(t('calendar.syncPending'), 'warning');
+    } else {
+      window.yuvomi?.showToast(t('calendar.savedToast'), 'success');
+    }
+  } catch (error) {
+    if (isConflictError(error)) {
+      await handleCalendarConflict(gesture.source);
+      return;
+    }
+    window.yuvomi?.showToast(error?.data?.error ?? t('calendar.saveError'), 'danger');
+  }
+}
+
+async function handleCalendarConflict(event = null) {
+  const retry = await confirmModal(t('calendar.editConflictTitle'), {
+    detail: t('calendar.editConflictDetail'),
+    confirmLabel: t('calendar.editConflictReload'),
+  });
+  if (retry) {
+    const sync = syncMetadata(event);
+    if (event?.id && sync.conflict && sync.operation_id) {
+      await api.post('/calendar/' + event.id + '/reload-sync', {
+        operation_id: sync.operation_id,
+      });
+    }
+    await reloadCalendarEventsOnly();
+    renderView();
+  }
+}
+
+const RECOVERY_FIELD_LABELS = {
+  title: 'calendar.titleLabel', description: 'calendar.descriptionLabel', location: 'calendar.locationLabel',
+  start_datetime: 'calendar.startDateLabel', end_datetime: 'calendar.endDateLabel', all_day: 'calendar.allDay',
+  recurrence_rule: 'rrule.labelRepeat',
+  assigned_to: 'calendar.assignedLabel',
+};
+
+async function discardRecoveryChanges(event) {
+  try {
+    await api.post('/calendar/' + event.id + '/discard-recovery', {});
+    await reloadCalendarEventsOnly({ throwOnError: true });
+    renderView();
+    window.yuvomi?.showToast(t('calendar.recoveryDiscarded'), 'success');
+  } catch (error) {
+    window.yuvomi?.showToast(error?.data?.error ?? t('calendar.saveError'), 'danger');
+  }
+}
+
+async function reviewRecoveryChanges(event) {
+  try { event = responseEvent(await api.get('/calendar/' + event.id)) || event; } catch { /* retain the visible changes */ }
+  const sync = syncMetadata(event);
+  const recovery = sync.recovery || {};
+  let original = null;
+  if (recovery.parent_event_id) {
+    try { original = responseEvent(await api.get('/calendar/' + recovery.parent_event_id)); } catch { /* deleted original remains reviewable as retained intent */ }
+  }
+  const entries = recovery.conflicts || [];
+  const retained = Object.entries(recovery.retained_changes || {});
+  const retainedAllDay = recovery.retained_changes?.all_day ?? event.all_day;
+  const providerAllDay = recovery.authoritative?.all_day ?? original?.all_day ?? event.all_day;
+  const value = (field, item, allDay) => {
+    if (item === null || item === undefined || item === '') return t('calendar.recoveryEmpty');
+    if (['start_datetime', 'end_datetime'].includes(field)) {
+      return allDay ? formatDate(localDate(String(item))) : formatDateTime(String(item));
+    }
+    return String(item);
+  };
+  openSharedModal({
+    title: t('calendar.recoveryReview'), size: 'sm',
+    content: '<p>' + esc(entries.length ? t('calendar.recoveryConflict') : t('calendar.recoveryUnavailable')) + '</p>'
+      + retained.map(([field, local]) => '<p><strong>' + esc(t(RECOVERY_FIELD_LABELS[field] || 'calendar.recoveryField'))
+        + '</strong>: ' + esc(value(field, field === 'assigned_to' && Array.isArray(local)
+          ? local.map((id) => state.users.find((user) => user.id === id)?.display_name || String(id)).join(', ') : local, retainedAllDay)) + '</p>').join('')
+      + entries.map((entry, index) => '<fieldset class="form-group"><legend>'
+        + esc(t(RECOVERY_FIELD_LABELS[entry.field] || 'calendar.recoveryField')) + '</legend>'
+        + '<label><input type="radio" name="recovery-' + index + '" value="local"> '
+        + esc(t('calendar.recoveryKeepLocal')) + ': ' + esc(value(entry.field, entry.local, retainedAllDay)) + '</label>'
+        + '<label><input type="radio" name="recovery-' + index + '" value="provider"> '
+        + esc(t('calendar.recoveryKeepProvider')) + ': ' + esc(value(entry.field, entry.provider, providerAllDay)) + '</label></fieldset>').join('')
+      + '<p id="recovery-choice-error" role="alert"></p><div class="modal-actions modal-actions--stack">'
+      + (entries.length ? '<button class="btn btn--primary" id="recovery-resolve">' + esc(t('common.save')) + '</button>' : '')
+      + (original ? '<button class="btn btn--ghost" id="recovery-original">' + esc(t('calendar.recoveryOriginal')) + '</button>' : '')
+      + '<button class="btn btn--danger" id="recovery-discard">' + esc(t('calendar.recoveryDiscard')) + '</button>'
+      + '<button class="btn btn--ghost" id="recovery-cancel">' + esc(t('common.cancel')) + '</button></div>',
+    onSave(panel) {
+      panel.querySelector('#recovery-cancel')?.addEventListener('click', () => closeModal({ force: true }));
+      panel.querySelector('#recovery-original')?.addEventListener('click', async () => {
+        await closeModal({ force: true }); await openEventDetail(original);
+      });
+      panel.querySelector('#recovery-discard')?.addEventListener('click', async () => {
+        await closeModal({ force: true }); await discardRecoveryChanges(event);
+      });
+      panel.querySelector('#recovery-resolve')?.addEventListener('click', async () => {
+        const choices = {};
+        for (const [index, entry] of entries.entries()) {
+          const choice = panel.querySelector('input[name="recovery-' + index + '"]:checked')?.value;
+          if (choice) choices[entry.field] = choice;
+        }
+        if (!Object.keys(choices).length) { panel.querySelector('#recovery-choice-error').textContent = t('calendar.recoveryChoose'); return; }
+        try {
+          await api.post('/calendar/' + event.id + '/resolve-recovery', { operation_id: sync.operation_id,
+            choices, expected_revision: recovery.authoritative_revision });
+          await closeModal({ force: true }); await reloadCalendarEventsOnly({ throwOnError: true }); renderView();
+        } catch (error) { panel.querySelector('#recovery-choice-error').textContent = error?.data?.error ?? t('calendar.saveError'); }
+      });
+    },
+  });
+}
+
+function recurringEditChoice(event) {
+  const occDateKey = localDate(event?.start_datetime) || '';
+  return new Promise((resolve) => {
+    let resolved = false;
+    const finish = (value) => {
+      if (resolved) return;
+      resolved = true;
+      closeModal({ force: true });
+      resolve(value);
+    };
+    openSharedModal({
+      title: t('calendar.editScopeTitle'),
+      size: 'sm',
+      content: '<div>'
+        + renderRecurringScopeChooserForEvent('gesture-edit', occDateKey, event)
+        + '<div class="modal-actions modal-actions--stack">'
+        + '<button type="button" class="btn btn--primary" id="gesture-edit-confirm">'
+        + t('common.save')
+        + '</button><button type="button" class="btn btn--ghost" id="gesture-edit-cancel">'
+        + t('common.cancel')
+        + '</button></div></div>',
+      onClose: () => finish(null),
+      onSave(panel) {
+        bindRecurringScopeChooser(panel, 'gesture-edit', event);
+        panel.querySelector('#gesture-edit-confirm')?.addEventListener('click', () => finish(getRecurringScope(panel, 'gesture-edit')));
+        panel.querySelector('#gesture-edit-cancel')?.addEventListener('click', () => finish(null));
+      },
+    });
+  });
+}
+
 function renderView() {
   const body = _container.querySelector('#cal-body');
   if (!body) return;
@@ -1954,6 +2547,9 @@ function renderView() {
   // nur die Monatsansicht setzt ihn danach wieder auf.
   _monthGridResizeObserver?.disconnect();
   _monthGridResizeObserver = null;
+  const preservedGestureScrollTop = _activeCalendarGesture?.started
+    ? _container.querySelector('.week-view__scroll, .day-view__scroll')?.scrollTop
+    : null;
   body.replaceChildren();
 
   // Vor allen vier Ansichten: nach einem Ladefehler sind Termine, Aufgaben und
@@ -1984,6 +2580,10 @@ function renderView() {
   }
   if (window.lucide) lucide.createIcons({ el: body });
   updateOfflineNotice();
+  if (Number.isFinite(preservedGestureScrollTop)) {
+    const nextScroll = _container.querySelector('.week-view__scroll, .day-view__scroll');
+    if (nextScroll) nextScroll.scrollTop = preservedGestureScrollTop;
+  }
 }
 
 // --------------------------------------------------------
@@ -2138,9 +2738,10 @@ function renderMonthDay(date, inMonth) {
   const evHtml = evShown.map((ev) => `
     <div class="month-day__event"
          data-id="${ev.id}"
+         data-calendar-direct-event
          style="${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}"
-    >${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span></div>
+    ><span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span><span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
   `).join('');
 
   const taskHtml = taskShown.map((tk) => renderTaskChip(tk, { interactive: false, icon: false })).join('');
@@ -2362,7 +2963,7 @@ function renderWeekView(container) {
       <div class="allday-row" style="display:grid;grid-template-columns:var(--cal-gutter-width) repeat(${colCount},1fr);">
         <div class="calendar-all-day-label">${t('calendar.allDayShort')}</div>
         ${days.map((d, i) => `
-          <div class="allday-cell">
+          <div class="allday-cell" data-date="${d}">
             ${holidaysOnDay(d).map((h) => `
               <div class="allday-holiday" style="--holi-color:${esc(h.color)};--holi-ink:${esc(getReadableTextColor(h.color))}" title="${esc(h.name)}">
                 <span>${esc(h.name)}</span>
@@ -2370,9 +2971,9 @@ function renderWeekView(container) {
             `).join('')}
             ${scheduleChips[i].map((entry) => renderScheduleChip(entry)).join('')}
             ${alldayEvs[i].map((ev) => `
-              <div class="allday-event" data-id="${ev.id}"
+              <div class="allday-event" data-id="${ev.id}" data-calendar-direct-event
                    style="${eventSurfaceStyle(ev)}"
-                   title="${esc(ev.title)}${ev.cal_name ? ' · ' + ev.cal_name : ''}${chipAssigneeTitleSuffix(ev)}">${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}</div>
+                   title="${esc(ev.title)}${ev.cal_name ? ' · ' + ev.cal_name : ''}${chipAssigneeTitleSuffix(ev)}"><span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
             `).join('')}
             ${tasksOnDay(d).map(renderTaskChip).join('')}
           </div>
@@ -2463,11 +3064,12 @@ function renderWeekEvent(ev, layout = null) {
   const width = layout ? `calc(${100 / layout.totalCols}% - 4px)` : 'auto';
 
   return `
-    <div class="week-event" data-id="${ev.id}"
+    <div class="week-event" data-id="${ev.id}" data-calendar-direct-event
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${chipAssigneeTitleSuffix(ev)}">
-      <div class="week-event__title">${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 14, maxVisible: 2 })}</div>
+      <span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span><div class="week-event__title">${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 14, maxVisible: 2 })}</div>
       <div class="week-event__time">${formatTime(ev.start_datetime)}${ev.end_datetime ? '–' + formatTime(ev.end_datetime) : ''}</div>
+      <span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span>
     </div>
   `;
 }
@@ -2502,7 +3104,7 @@ function nowMinutes() {
   return hour * 60 + minute;
 }
 
-/** Berechnet die geklickte Uhrzeit (auf 30-Minuten gerundet) aus einem Click-Event
+/** Berechnet die geklickte Uhrzeit (auf 15-Minuten gerundet) aus einem Click-Event
  *  relativ zum übergebenen Spalten-Element. Die Stundenhöhe wird an der Spalte
  *  gemessen (sie ist immer 24 Stunden hoch), nicht aus einer Zahl in dieser Datei
  *  gelesen - so stimmt der Treffer auch in der dichteren Tagesansicht. */
@@ -2511,8 +3113,8 @@ function clickedTime(e, colEl) {
   const hourHeight = measuredHourHeight(colEl);
   if (!hourHeight) return '09:00';
   const yOffset = Math.max(0, e.clientY - rect.top);
-  const totalMinutes = Math.round((yOffset / hourHeight) * 60 / 30) * 30;
-  const clamped = Math.min(Math.max(totalMinutes, 0), 23 * 60 + 30);
+  const totalMinutes = Math.round((yOffset / hourHeight) * 60 / CALENDAR_SNAP_MINUTES) * CALENDAR_SNAP_MINUTES;
+  const clamped = Math.min(Math.max(totalMinutes, 0), 24 * 60 - CALENDAR_SNAP_MINUTES);
   return `${pad(Math.floor(clamped / 60))}:${pad(clamped % 60)}`;
 }
 
@@ -2624,7 +3226,7 @@ function renderDayView(container) {
       ${(allday.length || scheduleChips.length || tasksOnDay(state.cursor).length || holidaysOnDay(state.cursor).length) ? `
       <div class="allday-row" style="display:grid;grid-template-columns:var(--cal-gutter-width) 1fr;">
         <div class="calendar-all-day-label">${t('calendar.allDayShort')}</div>
-        <div class="allday-cell">
+        <div class="allday-cell" data-date="${state.cursor}">
           ${holidaysOnDay(state.cursor).map((h) => `
             <div class="allday-holiday" style="--holi-color:${esc(h.color)};--holi-ink:${esc(getReadableTextColor(h.color))}" title="${esc(h.name)}">
               <span>${esc(h.name)}</span>
@@ -2632,9 +3234,9 @@ function renderDayView(container) {
           `).join('')}
           ${scheduleChips.map((entry) => renderScheduleChip(entry)).join('')}
           ${allday.map((ev) => `
-            <div class="allday-event" data-id="${ev.id}"
+            <div class="allday-event" data-id="${ev.id}" data-calendar-direct-event
                  style="${eventSurfaceStyle(ev)}"
-                 title="${esc(ev.title)}${ev.cal_name ? ' · ' + ev.cal_name : ''}${chipAssigneeTitleSuffix(ev)}">${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}</div>`).join('')}
+                 title="${esc(ev.title)}${ev.cal_name ? ' · ' + ev.cal_name : ''}${chipAssigneeTitleSuffix(ev)}"><span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>`).join('')}
           ${tasksOnDay(state.cursor).map(renderTaskChip).join('')}
         </div>
       </div>` : ''}
@@ -2722,15 +3324,16 @@ function renderDayEvent(ev, layout = null) {
   const timeText = `${formatTime(ev.start_datetime)}${ev.end_datetime ? '–' + formatTime(ev.end_datetime) : ''}`;
 
   return `
-    <div class="day-event${roomy ? '' : ' day-event--tight'}" data-id="${ev.id}"
+    <div class="day-event${roomy ? '' : ' day-event--tight'}" data-id="${ev.id}" data-calendar-direct-event
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.location ? ' · ' + esc(fmtLocation(ev.location)) : ''}${chipAssigneeTitleSuffix(ev)}">
-      <span class="day-event__spine" aria-hidden="true"></span>
+      <span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span><span class="day-event__spine" aria-hidden="true"></span>
       <span class="day-event__text">
         <span class="day-event__title">${hasEventIcon(ev.icon) ? eventIconHtml(ev.icon, 'event-icon event-icon--compact') : ''}${calendarRepeatIconHtml(ev)}<span class="day-event__name">${esc(ev.title)}</span></span>
         ${roomy ? `<span class="day-event__meta">${timeText}${place}</span>` : ''}
       </span>
       ${roomy ? chipAssigneeStack(ev, { size: 20, maxVisible: 2 }) : ''}
+      <span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span>
     </div>
   `;
 }
@@ -3499,6 +4102,8 @@ function reminderSummary(ev, reminders) {
  * wiederkehrt, musste ihn zum Bearbeiten öffnen.
  */
 function renderEventDetail(ev, reminders = []) {
+  const capabilities = editCapabilities(ev);
+  const sync = syncMetadata(ev);
   const timeStr = ev.all_day
     ? `${formatPreferredDate(localDate(ev.start_datetime))} · ${t('calendar.allDay')}`
     : formatDateTime(ev.start_datetime)
@@ -3527,7 +4132,21 @@ function renderEventDetail(ev, reminders = []) {
       multiline: true,
     },
     { icon: 'paperclip', label: t('calendar.attachmentLabel'), node: attachmentNode(ev) },
-  ];
+    !isEditAllowed(ev, 'edit')
+      ? {
+          icon: 'lock',
+          label: t('calendar.editReadOnly'),
+          value: editBlockReason(ev) || capabilities.read_only_reason || t('calendar.editReadOnlyReason'),
+        }
+      : null,
+    sync.state === 'pending'
+      ? { icon: 'refresh-cw', label: t('calendar.syncStatusLabel'), value: t('calendar.syncPending') }
+      : sync.state === 'error'
+        ? { icon: 'alert-triangle', label: t('calendar.syncStatusLabel'), value: sync.recovery
+          ? (sync.failure_kind === 'recovery_field_conflict' ? t('calendar.recoveryConflict') : t('calendar.recoveryUnavailable'))
+          : t('calendar.syncError') }
+        : null,
+  ].filter(Boolean);
 }
 
 /**
@@ -3550,19 +4169,22 @@ async function openEventDetail(ev, anchor = null) {
   let reminders = [];
   const remindersReady = loadReminderForEvent(ev.id).then((r) => { reminders = r; });
 
-  const actions = [{
-    id: 'detail-delete',
-    label: t('common.delete'),
-    variant: 'danger-ghost',
-    icon: 'trash-2',
-    align: 'start',
-    // force + await: Löschen entscheidet über die Eingaben mit, eine
-    // Verwerfen-Frage davor wäre die zweite Rückfrage für dieselbe
-    // Entscheidung. Der await hält das Löschen zurück, bis der Overlay-Slot
-    // wirklich frei ist - requestDeleteEvent öffnet bei Serien selbst einen
-    // Dialog, und das Shared-Modal kennt kein Stacking.
-    onClick: async ({ close }) => { await close({ force: true }); await requestDeleteEvent(ev); },
-  }];
+  const actions = [];
+  if (isEditAllowed(ev, 'edit') && !syncMetadata(ev).recovery) {
+    actions.push({
+      id: 'detail-delete',
+      label: t('common.delete'),
+      variant: 'danger-ghost',
+      icon: 'trash-2',
+      align: 'start',
+      // force + await: Löschen entscheidet über die Eingaben mit, eine
+      // Verwerfen-Frage davor wäre die zweite Rückfrage für dieselbe
+      // Entscheidung. Der await hält das Löschen zurück, bis der Overlay-Slot
+      // wirklich frei ist - requestDeleteEvent öffnet bei Serien selbst einen
+      // Dialog, und das Shared-Modal kennt kein Stacking.
+      onClick: async ({ close }) => { await close({ force: true }); await requestDeleteEvent(ev); },
+    });
+  }
 
   // ICS-Abos: Ein lokal geänderter Termin lässt sich auf das Original
   // zurücksetzen. Die Aktion gehört zum Objekt, also in die Fußzeile.
@@ -3590,13 +4212,77 @@ async function openEventDetail(ev, anchor = null) {
     });
   }
 
+  const sync = syncMetadata(ev);
+  if (sync.recovery) {
+    actions.push({ id: 'detail-recovery-review', label: t('calendar.recoveryReview'), icon: 'eye', variant: 'ghost',
+      onClick: async ({ close }) => { await close({ force: true }); await reviewRecoveryChanges(ev); } });
+    actions.push({ id: 'detail-recovery-discard', label: t('calendar.recoveryDiscard'), icon: 'trash-2', variant: 'danger-ghost',
+      onClick: async ({ close }) => { await close({ force: true }); await discardRecoveryChanges(ev); } });
+  }
+  if (!sync.recovery && (sync.state === 'pending' || sync.state === 'error')) {
+    actions.push({
+      id: 'detail-sync-reload',
+      label: t('common.reload'),
+      variant: 'ghost',
+      icon: 'refresh-cw',
+      onClick: async ({ close }) => {
+        try {
+          if (sync.conflict && sync.operation_id) {
+            await api.post('/calendar/' + ev.id + '/reload-sync', {
+              operation_id: sync.operation_id,
+            });
+          }
+          await reloadCalendarEventsOnly({ throwOnError: true });
+          await close({ force: true });
+          renderView();
+        } catch (error) {
+          window.yuvomi?.showToast(error?.data?.error ?? t('calendar.loadError'), 'danger');
+        }
+      },
+    });
+  }
+  if (sync.state === 'error' && sync.retryable) {
+    actions.push({
+      id: 'detail-sync-retry',
+      label: t('calendar.syncRetry'),
+      variant: 'ghost',
+      icon: 'refresh-cw',
+      onClick: async ({ close }) => {
+        try {
+          const response = await api.post('/calendar/' + ev.id + '/retry-sync', {});
+          const updated = responseEvent(response);
+          await close({ force: true });
+          if (updated) {
+            const index = state.events.findIndex((item) => String(item.id) === String(updated.id));
+            if (index !== -1) state.events[index] = updated;
+          }
+          await reloadCalendarEventsOnly({ throwOnError: true });
+          renderView();
+          const refreshed = updated
+            || state.events.find((item) => String(item.id) === String(ev.id))
+            || ev;
+          const refreshedSync = syncMetadata(refreshed);
+          if (refreshedSync.state === 'error') {
+            window.yuvomi?.showToast(t('calendar.syncError'), 'danger');
+          } else if (refreshedSync.state === 'pending') {
+            window.yuvomi?.showToast(t('calendar.syncPending'), 'warning');
+          } else {
+            window.yuvomi?.showToast(t('calendar.syncRetrying'), 'success');
+          }
+        } catch (error) {
+          window.yuvomi?.showToast(error?.data?.error ?? t('calendar.loadError'), 'danger');
+        }
+      },
+    });
+  }
+
   const view = openDetailView({
     title: ev.title,
     accentColor: resolveEventBackground(ev),
     anchor,
     sections: renderEventDetail(ev, reminders),
     actions,
-    edit: {
+    edit: isEditAllowed(ev, 'edit') && !sync.recovery ? {
       label: t('common.edit'),
       title: t('calendar.editEvent'),
       // Das Formular wartet auf die Erinnerungen, die Leseansicht nicht. Ohne
@@ -3613,7 +4299,7 @@ async function openEventDetail(ev, anchor = null) {
         await remindersReady;
         openEventModal({ mode: 'edit', event: ev, reminder: reminders });
       },
-    },
+    } : null,
   });
 
   // Die Erinnerungszeile nachtragen. Zeilen ohne Inhalt fallen ohnehin weg, ein
@@ -3998,7 +4684,7 @@ function wireEventForm(panel, { mode, event = null, reminder = null }) {
       panel.querySelector('#modal-allday')?.checked ? '#modal-allday-start' : '#modal-start-date',
     ),
   });
-  bindRecurringScopeChooser(panel, 'modal-edit');
+  bindRecurringScopeChooser(panel, 'modal-edit', event);
   bindUserMultiSelect(panel, 'cal_assigned');
   wireVisibilityWarning(panel, '#modal-visibility', 'cal_assigned', '#modal-visibility-warning');
 
@@ -4273,17 +4959,19 @@ function wireDurationMemory(panel) {
   });
 }
 
-// Neue Termine ohne explizite Uhrzeit starten heute zur nächsten halben
+// Neue Termine ohne explizite Uhrzeit starten heute im 15-Minuten-Raster
 // Stunde: der starre 09:00-Default legte den Start nachmittags in die
 // Vergangenheit (Audit A1-18). Andere Tage behalten 09:00 als neutralen
 // Start; kippt die Rundung über Mitternacht, ebenfalls.
 function defaultNewEventTime(dateStr) {
   if (dateStr !== state.today) return '09:00';
-  // Auf die naechste halbe Stunde aufrunden - auf den Feldern der Haushaltszone
-  // statt auf einem Date, damit der Vorschlag zu der Uhr passt, die daneben im
-  // Raster steht. Kippt die Rundung ueber Mitternacht, bleibt es bei 09:00.
+  // Auf die naechste Viertelstunde aufrunden - auf den Feldern der
+  // Haushaltszone statt auf einem Date, damit der Vorschlag zu der Uhr passt,
+  // die daneben im Raster steht. Kippt die Rundung ueber Mitternacht, bleibt
+  // es bei 09:00.
   const { hour, minute } = nowFields();
-  const rounded = minute <= 30 ? { hour, minute: 30 } : { hour: hour + 1, minute: 0 };
+  const total = Math.ceil((hour * 60 + minute) / CALENDAR_SNAP_MINUTES) * CALENDAR_SNAP_MINUTES;
+  const rounded = { hour: Math.floor(total / 60), minute: total % 60 };
   if (rounded.hour > 23) return '09:00';
   return `${pad(rounded.hour)}:${pad(rounded.minute)}`;
 }
@@ -4297,13 +4985,19 @@ function buildEventModalContent({ mode, event, date, reminder = null, time = nul
     ? localTime(event.start_datetime) : (time ?? defaultNewEventTime(today));
   // Standard-Termindauer aus den Präferenzen: neue Termine erhalten ein Ende,
   // das um die konfigurierte Dauer nach dem Start liegt (#441).
-  const durationMin = state.defaultDuration || 60;
+  const durationMin = Math.max(
+    CALENDAR_MIN_TIMED_MINUTES,
+    Math.round((state.defaultDuration || 60) / CALENDAR_SNAP_MINUTES) * CALENDAR_SNAP_MINUTES,
+  );
   const derivedEnd  = addDurationToDateTime(startDate, startTime, durationMin);
   const endDate   = isEdit && event.end_datetime ? localDate(event.end_datetime) : derivedEnd.date;
   const endTime   = isEdit && event.end_datetime && event.end_datetime.length > 10
     ? localTime(event.end_datetime)
     : derivedEnd.time;
   const selectedIcon = eventIconName(isEdit ? event.icon : 'calendar');
+  const recurrenceRuleForForm = isEdit && isDetachedEvent(event)
+    ? recurrenceParent(event)?.recurrence_rule ?? null
+    : (isEdit ? event.recurrence_rule : null);
 
   // Neue Termine: optional den aktuellen Nutzer vorbelegen (#498).
   const selectedUserIds = isEdit
@@ -4500,7 +5194,7 @@ function buildEventModalContent({ mode, event, date, reminder = null, time = nul
 
     ${advancedSection(advancedFieldsHtml, { open: advancedFieldsOpen })}
 
-    ${renderRRuleFields('event', isEdit ? event.recurrence_rule : null, {
+    ${renderRRuleFields('event', recurrenceRuleForForm, {
       allowCount: true,
       expandsFromStart: true,
       // Kanonischer Datums-Key aus dem Kalenderzustand. Das Widget formatiert
@@ -4508,7 +5202,7 @@ function buildEventModalContent({ mode, event, date, reminder = null, time = nul
       startDate,
     })}
 
-    ${isEdit && isLocalRecurringSeries(event) ? renderRecurringScopeChooser('modal-edit', event.start_datetime.slice(0, 10)) : ''}
+    ${isEdit && isRecurringEvent(event) ? renderRecurringScopeChooserForEvent('modal-edit', localDate(event.start_datetime), event) : ''}
 
     ${renderCalendarReminderSection(reminder, event, isEdit ? [] : state.defaultReminders)}
 
@@ -4673,58 +5367,89 @@ async function saveEvent(overlay, mode, event, existingReminder = null, attachme
     // Serien-Scopes ändern die Expansion (Split/EXDATE): danach den sichtbaren
     // Bereich neu laden, damit der Server korrekt expandiert (#532).
     let reloadAfter = false;
+    let savedResponseEvent = null;
 
     if (mode === 'create') {
       const res = await api.post('/calendar', body);
-      state.events.push(res.data);
-      savedEventId = res.data?.id;
-    } else {
-      // Scope-Auswahl greift nur für rein lokale Serien (#532); sonst normaler
-      // Master-Update wie bisher (Einzeltermine, externe Serien).
-      const scope = isLocalRecurringSeries(event)
+      const created = responseEvent(res) || res.data;
+      state.events.push(created);
+      savedEventId = created?.id;
+      savedResponseEvent = created;
+    } else if (mode === 'edit') {
+      const recurring = isRecurringEvent(event);
+      const capabilities = editCapabilities(event);
+      const scopedProvider = capabilities.scope_reason !== 'provider_scope_unsupported';
+      // Apple and other legacy providers keep their ordinary single-event PUT
+      // path.  Existing recurrence rules remain readable and ordinary field
+      // edits stay usable; only an attempted rule change on an existing series
+      // is blocked because this provider has no validated scope adapter.
+      const scope = recurring
         ? getRecurringScope(overlay, 'modal-edit')
         : 'series';
-      const occDate = event?.start_datetime?.slice(0, 10);
-      // Am Anfang der Serie wird der Master aktualisiert statt geschnitten -
-      // warum das nicht an `is_recurring_instance` allein haengt, steht bei der
-      // Funktion.
-      const truncated = scope === 'following' && !followingMeansWholeSeries(event)
-        ? truncateRuleBefore(event.recurrence_rule, occDate)
-        : null;
-
-      if (scope === 'this') {
-        // Nur dieses Vorkommen: losgelösten Einzeltermin anlegen + Master-EXDATE.
-        const res = await api.post('/calendar', { ...body, recurrence_rule: null });
-        await api.post(`/calendar/${eventId}/exceptions`, { date: occDate });
-        savedEventId = res.data?.id;
-        reloadAfter = true;
-      } else if (truncated) {
-        // Dieser und folgende: Master per UNTIL kürzen, neue Serie ab hier anlegen.
-        // body trägt die (ggf. bearbeitete) recurrence_rule als Fortsetzungsregel.
-        await api.put(`/calendar/${eventId}`, { recurrence_rule: truncated });
-        const res = await api.post('/calendar', body);
-        savedEventId = res.data?.id;
-        reloadAfter = true;
-      } else {
-        // Ganze Serie (auch „folgende" beim ersten Vorkommen): Master aktualisieren.
-        // Bei lokalen Serien den DTSTART erhalten, indem die im Modal sichtbare
-        // Instanz-Verschiebung auf den Master-Start übertragen wird.
-        let seriesBody = body;
-        if (isLocalRecurringSeries(event)) {
-          const master  = (await api.get(`/calendar/${eventId}`)).data;
-          const allDay  = !!body.all_day;
-          const newStart = shiftSeriesStart(master.start_datetime, event.start_datetime, start_datetime, allDay);
-          const newEnd   = shiftEndForStart(newStart, start_datetime, end_datetime, allDay);
-          seriesBody = { ...body, start_datetime: newStart, end_datetime: newEnd };
-          reminderBaseStart = newStart;
-          reloadAfter = true;
+      // The form may display an inherited parent rule for a detached
+      // occurrence while the detached row itself intentionally has no rule.
+      // Compare with the widget's original source value so a title-only save
+      // keeps the least-destructive default scope (`this`) instead of asking
+      // for a series decision the user never made.
+      const initialRecurrenceRule = overlay.querySelector('#event-rrule-source')?.value || '';
+      const recurrenceChanged = String(rrule.recurrence_rule || '')
+        !== String(initialRecurrenceRule);
+      if (!scopedProvider && recurring && recurrenceChanged) {
+        const error = new Error(t('calendar.editScopeUnsupported'));
+        error.calendarMessage = t('calendar.editScopeUnsupported');
+        throw error;
+      }
+      if (scopedProvider && recurring && recurrenceChanged && scope === 'this') {
+        reportFieldError(
+          overlay.querySelector('#modal-edit-scope'),
+          t('calendar.editScopeRecurrenceChoose'),
+        );
+        saveBtn.disabled = false;
+        saveBtn.textContent = t('common.save');
+        return;
+      }
+      if (!scopedProvider) {
+        const legacyBody = { ...body };
+        // A detached row displays its parent's rule, but the row itself owns no
+        // recurrence rule. Preserve that storage shape on an ordinary legacy
+        // save so a title edit cannot turn the detached occurrence into a new
+        // series.
+        if (isDetachedEvent(event) && !recurrenceChanged) {
+          legacyBody.recurrence_rule = event.recurrence_rule ?? null;
         }
-        const res = await api.put(`/calendar/${eventId}`, seriesBody);
-        const idx = state.events.findIndex((e) => e.id === eventId);
-        if (idx !== -1) state.events[idx] = res.data;
+        const res = await api.put('/calendar/' + eventId, {
+          ...legacyBody,
+          expected_revision: eventRevision(event) ?? '',
+        });
+        const updated = responseEvent(res);
+        savedEventId = updated?.id ?? eventId;
+        reminderBaseStart = updated?.start_datetime ?? start_datetime;
+        savedResponseEvent = updated;
+        const idx = state.events.findIndex((item) => String(item.id) === String(eventId));
+        if (idx !== -1 && updated) state.events[idx] = updated;
+        reloadAfter = false;
+      } else {
+        const editBody = {
+          ...body,
+          edit_scope: scope,
+          occurrence_start: eventOccurrenceStart(event) ?? start_datetime,
+          expected_revision: eventRevision(event) ?? '',
+        };
+        Object.assign(editBody, scopedRecurrencePayload(event, rrule.recurrence_rule, scope));
+        const parentRevision = recurrenceParentRevision(event);
+        if (scope !== 'this' && parentRevision !== null && parentRevision !== undefined) {
+          editBody.expected_parent_revision = parentRevision;
+        }
+        const res = await api.put('/calendar/' + eventId, editBody);
+        const updated = responseEvent(res);
+        savedEventId = updated?.id ?? eventId;
+        reminderBaseStart = updated?.start_datetime ?? start_datetime;
+        reloadAfter = isRecurringEvent(event);
+        savedResponseEvent = updated;
+        const idx = state.events.findIndex((item) => String(item.id) === String(eventId));
+        if (idx !== -1 && updated) state.events[idx] = updated;
       }
     }
-
     // Erinnerungen speichern oder löschen (mehrere je Termin möglich, #436).
     if (savedEventId) {
       const reminderOn = overlay.querySelector('#modal-reminder-toggle')?.checked;
@@ -4755,18 +5480,36 @@ async function saveEvent(overlay, mode, event, existingReminder = null, attachme
       refreshReminders();
     }
 
+    let refreshError = null;
     if (reloadAfter) {
-      await reloadCalendarEventsOnly();
+      try {
+        await reloadCalendarEventsOnly({ throwOnError: true });
+      } catch (error) {
+        refreshError = error;
+      }
     }
 
     closeModal({ force: true });
     renderView();
-    window.yuvomi?.showToast(mode === 'create' ? t('calendar.createdToast') : t('calendar.savedToast'), 'success');
+    const sync = syncMetadata(savedResponseEvent || event);
+    if (refreshError) {
+      window.yuvomi?.showToast(t('calendar.loadError'), 'danger');
+    } else if (sync.state === 'error') {
+      window.yuvomi?.showToast(t('calendar.syncError'), 'danger');
+    } else if (sync.state === 'pending') {
+      window.yuvomi?.showToast(t('calendar.syncPending'), 'warning');
+    } else {
+      window.yuvomi?.showToast(mode === 'create' ? t('calendar.createdToast') : t('calendar.savedToast'), 'success');
+    }
   } catch (err) {
     // Server-Validierungsmeldung bevorzugen, sonst lokalisierter Fallback; der
     // rohe err.message-Text (Netzwerk/JS) wird nie gezeigt. Das Modal bleibt offen
     // und der Button reaktiviert — die Eingaben des Nutzers bleiben erhalten.
-    window.yuvomi?.showToast(err.data?.error ?? t('calendar.saveError'), 'danger');
+    if (isConflictError(err)) {
+      await handleCalendarConflict(event);
+    } else {
+      window.yuvomi?.showToast(err.calendarMessage ?? err.data?.error ?? t('calendar.saveError'), 'danger');
+    }
     saveBtn.disabled    = false;
     saveBtn.textContent = mode === 'edit' ? t('common.save') : t('common.create');
   }
@@ -4799,6 +5542,73 @@ async function deleteEvent(id) {
  * „Nur diesen Termin" (least-destructive) plus dynamischem Reichweiten-Hinweis,
  * der das konkrete Vorkommensdatum nennt. `prefix` → Element-ID `${prefix}-scope`.
  */
+function renderRecurringScopeChooserForEvent(prefix, occDateKey, event = null) {
+  const capabilities = editCapabilities(event);
+  const scopes = capabilities.scopes || {};
+  const detached = isDetachedEvent(event);
+  const parent = recurrenceParent(event);
+  const parentReady = !detached
+    || Boolean(parent?.id && parent?.revision !== undefined && parent?.revision !== null
+      && String(parent.revision).trim() !== '');
+  const allowed = (scope) => scopes[scope] !== false
+    && (scope === 'this' || (capabilities.can_change_scope && parentReady));
+  const defaultScope = allowed('this') ? 'this'
+    : allowed('following') ? 'following'
+      : allowed('series') ? 'series' : 'this';
+  const summary = exceptionSummary(event);
+  const exceptionList = summary?.known
+    ? (summary.items || []).map((item) => '<li>'
+      + esc(t('calendar.editScopeExceptionItem', {
+        original: item.original_start || '',
+        current: item.current_start || '',
+        state: item.state || '',
+      }))
+      + '</li>').join('')
+    : '';
+  const exceptionMarkup = summary
+    ? '<details class="calendar-exception-summary">'
+      + '<summary>' + t('calendar.editScopeExceptions', { count: summary.count }) + '</summary>'
+      + (summary.known
+        ? '<ul>' + exceptionList + '</ul>'
+          + (summary.truncated
+            ? '<p class="form-hint">' + t('calendar.editScopeExceptionsTruncated') + '</p>'
+            : '')
+        : '<p class="form-hint">' + t('calendar.editScopeExceptionsUnknown') + '</p>')
+      + '</details>'
+    : '';
+  const parentMarkup = detached && !parentReady
+    ? '<p class="form-hint field-hint--warn" role="status">'
+      + '<i data-lucide="lock" aria-hidden="true"></i>'
+      + '<span>' + t('calendar.editScopeParentUnavailable') + '</span>'
+      + '</p>'
+    : '';
+  const overlapMarkup = '<p class="form-hint field-hint--warn" id="' + prefix
+    + '-scope-overlap" role="alert" hidden>'
+    + '<i data-lucide="alert-triangle" aria-hidden="true"></i><span></span></p>';
+  return [
+    '<div class="form-group">',
+    '<label class="form-label" for="' + prefix + '-scope">'
+      + t('calendar.recurringScopeLabel') + '</label>',
+    '<select class="input" id="' + prefix + '-scope" name="' + prefix + '-scope" data-occ-date="'
+      + esc(occDateKey) + '">',
+    '<option value="this" ' + (defaultScope === 'this' ? 'selected' : '')
+      + (allowed('this') ? '' : ' disabled') + '>'
+      + t('calendar.recurringScopeThis') + '</option>',
+    '<option value="following" ' + (defaultScope === 'following' ? 'selected' : '')
+      + (allowed('following') ? '' : ' disabled') + '>'
+      + t('calendar.recurringScopeFollowing') + '</option>',
+    '<option value="series" ' + (defaultScope === 'series' ? 'selected' : '')
+      + (allowed('series') ? '' : ' disabled') + '>'
+      + t('calendar.recurringScopeSeries') + '</option>',
+    '</select>',
+    '<p class="form-hint" id="' + prefix + '-scope-hint" role="status"></p>',
+    parentMarkup,
+    overlapMarkup,
+    exceptionMarkup,
+    '</div>',
+  ].join('');
+}
+
 function renderRecurringScopeChooser(prefix, occDateKey) {
   return `
     <div class="form-group">
@@ -4822,11 +5632,26 @@ function recurringScopeHint(value, occDateKey) {
 }
 
 /** Verdrahtet den dynamischen Hinweis der Scope-Auswahl. No-op ohne Chooser. */
-function bindRecurringScopeChooser(root, prefix) {
+function bindRecurringScopeChooser(root, prefix, event = null) {
   const sel  = root.querySelector(`#${prefix}-scope`);
   const hint = root.querySelector(`#${prefix}-scope-hint`);
+  const overlap = root.querySelector(`#${prefix}-scope-overlap`);
   if (!sel || !hint) return;
-  const update = () => { hint.textContent = recurringScopeHint(sel.value, sel.dataset.occDate); };
+  const summary = exceptionSummary(event);
+  const update = () => {
+    hint.textContent = recurringScopeHint(sel.value, sel.dataset.occDate);
+    if (!overlap) return;
+    if (sel.value === 'this' || !summary || (summary.known && summary.count < 1)) {
+      overlap.hidden = true;
+      return;
+    }
+    const message = summary.known
+      ? t('calendar.editScopeOverlap', { count: summary.count })
+      : t('calendar.editScopeOverlapUnknown');
+    const text = overlap.querySelector('span');
+    if (text) text.textContent = message;
+    overlap.hidden = false;
+  };
   sel.addEventListener('change', update);
   update();
 }
@@ -4912,6 +5737,7 @@ function confirmExternalSeriesDelete(event) {
 }
 
 async function requestDeleteEvent(event) {
+  if (syncMetadata(event).recovery) { await discardRecoveryChanges(event); return; }
   if (isExternalRecurringSeries(event)) {
     if (await confirmExternalSeriesDelete(event)) await deleteEvent(event.id);
     return;

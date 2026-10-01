@@ -22,6 +22,7 @@ import { mountEmptyState, mountLoadError } from '/utils/empty-state.js';
 import { renderPageSearch, wirePageSearch } from '/utils/page-search.js';
 import { mealTypeList, ensureMealTypeNames } from '/utils/meal-types.js';
 import { recipeThumbEl } from '/utils/recipe-thumb.js';
+import { RECIPE_IMPORT_SOURCES, buildRecipeImportPrompt, parseRecipeImportJson } from '/utils/recipe-import.js';
 
 let _container = null;
 /** Handle des geteilten Suchfelds (setValue/clear), gesetzt in render(). */
@@ -243,8 +244,13 @@ export async function render(container) {
   // dem Laden).
   const actions = document.createElement('div');
   actions.className = 'page-toolbar__actions';
-  actions.id = 'recipes-source-filter';
-  actions.hidden = true;
+  actions.id = 'recipes-toolbar-actions';
+  actions.insertAdjacentHTML('beforeend', `
+    <button type="button" class="btn btn--ghost btn--icon" id="recipes-import"
+            aria-label="${esc(t('recipes.importRecipe'))}" title="${esc(t('recipes.importRecipe'))}">
+      <i data-lucide="download" class="icon-md" aria-hidden="true"></i>
+    </button>
+    <div id="recipes-source-filter" hidden></div>`);
   toolbar.appendChild(actions);
 
   const list = document.createElement('div');
@@ -293,6 +299,7 @@ export async function render(container) {
   openRecipeFromQuery();
 
   fab.addEventListener('click', () => openRecipeModal('create'));
+  actions.querySelector('#recipes-import')?.addEventListener('click', openRecipeImportModal);
 
   // Handle im Modul halten: der Zurücksetzen-Pfad des Suchtreffer-Leerzustands
   // braucht `clear()`, nicht nur `input.value = ''` - sonst bliebe der
@@ -789,8 +796,138 @@ function renderRecipeList() {
  * sichtbar, bevor man überhaupt aufklappt (siehe sourceBadge() weiter oben).
  */
 
-function openRecipeModal(mode, recipe = null) {
+function openRecipeImportModal() {
+  const sourceOptions = RECIPE_IMPORT_SOURCES
+    .map(({ id, label }) => `<option value="${id}">${esc(label)}</option>`)
+    .join('');
+
+  openSharedModal({
+    title: t('recipes.importRecipe'),
+    size: 'md',
+    content: `
+      <div class="form-group">
+        <label class="form-label" for="recipe-import-source">${t('recipes.importSource')}</label>
+        <select class="form-input" id="recipe-import-source">
+          ${sourceOptions}
+          <option value="other">${t('recipes.importSourceOther')}</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="recipe-import-url">${t('recipes.urlLabel')}</label>
+        <input class="form-input" id="recipe-import-url" type="url" inputmode="url" placeholder="${t('recipes.urlPlaceholder')}">
+        <p class="form-hint" id="recipe-import-hint">${t('recipes.importDirectHint')}</p>
+      </div>
+      <div class="recipe-import-other" id="recipe-import-other" hidden>
+        <div class="form-group">
+          <label class="form-label" for="recipe-import-prompt">${t('recipes.importPromptLabel')}</label>
+          <textarea class="form-input recipe-import-code" id="recipe-import-prompt" rows="9" readonly></textarea>
+          <button class="btn btn--secondary btn--sm" type="button" id="recipe-import-copy">${t('recipes.importCopyPrompt')}</button>
+        </div>
+        <div class="form-group">
+          <label class="form-label" for="recipe-import-json">${t('recipes.importJsonLabel')}</label>
+          <textarea class="form-input recipe-import-code" id="recipe-import-json" rows="7"
+                    placeholder="${t('recipes.importJsonPlaceholder')}"></textarea>
+        </div>
+      </div>
+      <div class="modal-panel__footer modal-panel__footer--plain">
+        <button class="btn btn--secondary" type="button" id="recipe-import-cancel">${t('common.cancel')}</button>
+        <button class="btn btn--primary" type="button" id="recipe-import-submit">${t('recipes.importRecipe')}</button>
+      </div>`,
+    onSave(panel) {
+      const sourceField = panel.querySelector('#recipe-import-source');
+      const urlField = panel.querySelector('#recipe-import-url');
+      const hint = panel.querySelector('#recipe-import-hint');
+      const otherFields = panel.querySelector('#recipe-import-other');
+      const promptField = panel.querySelector('#recipe-import-prompt');
+      const jsonField = panel.querySelector('#recipe-import-json');
+      const submit = panel.querySelector('#recipe-import-submit');
+
+      const sourceUrl = () => {
+        const raw = urlField.value.trim();
+        try {
+          const parsed = new URL(raw);
+          if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error();
+          if (sourceField.value !== 'other' && parsed.protocol !== 'https:') throw new Error();
+          if (parsed.href.length > 2000) throw new Error();
+          return parsed.href;
+        } catch {
+          reportFieldError(urlField, t('recipes.importInvalidUrl'));
+          return null;
+        }
+      };
+      const refresh = () => {
+        const isOther = sourceField.value === 'other';
+        otherFields.hidden = !isOther;
+        hint.textContent = t(isOther ? 'recipes.importOtherHint' : 'recipes.importDirectHint');
+        submit.textContent = t(isOther ? 'recipes.importUseJson' : 'recipes.importRecipe');
+        promptField.value = buildRecipeImportPrompt(urlField.value.trim());
+      };
+      const reviewDraft = async (draft) => {
+        await closeSharedModal({ force: true });
+        openRecipeModal('create', null, draft);
+        window.yuvomi?.showToast(t('recipes.importReviewHint'), 'info');
+      };
+
+      sourceField.addEventListener('change', refresh);
+      urlField.addEventListener('input', refresh);
+      panel.querySelector('#recipe-import-cancel').addEventListener('click', closeModal);
+      panel.querySelector('#recipe-import-copy').addEventListener('click', async () => {
+        const url = sourceUrl();
+        if (!url) return;
+        promptField.value = buildRecipeImportPrompt(url);
+        let copied = false;
+        if (navigator.clipboard?.writeText) {
+          try {
+            await navigator.clipboard.writeText(promptField.value);
+            copied = true;
+          } catch { /* self-hosted HTTP falls back to selection + execCommand */ }
+        }
+        if (!copied) {
+          try {
+            promptField.focus();
+            promptField.select();
+            copied = document.execCommand('copy');
+          } catch { /* selection remains available for a manual copy */ }
+        }
+        window.yuvomi?.showToast(
+          t(copied ? 'recipes.importPromptCopied' : 'common.errorGeneric'),
+          copied ? 'success' : 'danger',
+        );
+      });
+      submit.addEventListener('click', async () => {
+        const url = sourceUrl();
+        if (!url) return;
+
+        if (sourceField.value === 'other') {
+          try {
+            await reviewDraft(parseRecipeImportJson(jsonField.value, url));
+          } catch (err) {
+            const key = err.code === 'MISSING_TITLE' ? 'recipes.importMissingTitle' : 'recipes.importInvalidJson';
+            reportFieldError(jsonField, t(key));
+          }
+          return;
+        }
+
+        submit.disabled = true;
+        submit.textContent = t('common.loading');
+        try {
+          const response = await api.post('/recipes/import/preview', { source: sourceField.value, url });
+          await reviewDraft(response.data);
+        } catch (err) {
+          submit.disabled = false;
+          submit.textContent = t('recipes.importRecipe');
+          window.yuvomi?.showToast(`${t('recipes.importFailed')} ${err.data?.error ?? ''}`.trim(), 'danger');
+        }
+      });
+      refresh();
+      if (window.lucide) window.lucide.createIcons({ el: panel });
+    },
+  });
+}
+
+function openRecipeModal(mode, recipe = null, draft = null) {
   const isEdit = mode === 'edit';
+  const initial = isEdit ? recipe : draft;
 
   openSharedModal({
     title: isEdit ? t('recipes.editRecipe') : t('recipes.addRecipe'),
@@ -839,16 +976,16 @@ function openRecipeModal(mode, recipe = null) {
           <label class="form-label" for="recipe-url">${t('recipes.urlLabel')}</label>
           <input id="recipe-url" class="form-input" type="url" placeholder="${t('recipes.urlPlaceholder')}">
         </div>`,
-        { open: isEdit && (!!recipe.notes || !!recipe.recipe_url) })}
+        { open: Boolean(initial?.notes || initial?.recipe_url) })}
       <div class="modal-panel__footer modal-panel__footer--plain">
         <button class="btn btn--secondary" id="recipe-cancel">${t('common.cancel')}</button>
         <button class="btn btn--primary" id="recipe-save">${isEdit ? t('common.save') : t('common.add')}</button>
       </div>
     `,
     onSave(panel) {
-      panel.querySelector('#recipe-title').value = isEdit ? recipe.title : '';
-      panel.querySelector('#recipe-notes').value = isEdit && recipe.notes ? recipe.notes : '';
-      panel.querySelector('#recipe-url').value = isEdit && recipe.recipe_url ? recipe.recipe_url : '';
+      panel.querySelector('#recipe-title').value = initial?.title || '';
+      panel.querySelector('#recipe-notes').value = initial?.notes || '';
+      panel.querySelector('#recipe-url').value = initial?.recipe_url || '';
 
       /* BILD (#1059, Schritt 2) - dasselbe Vorgehen wie beim Gegenstandsfoto:
        * Auswahl, Zuschnitt und Groessenpruefung macht `pickCroppedImage`.
@@ -913,8 +1050,8 @@ function openRecipeModal(mode, recipe = null) {
       });
 
       const ingList = panel.querySelector('#recipe-ingredient-list');
-      if (isEdit && recipe.ingredients?.length) {
-        ingList.insertAdjacentHTML('beforeend', recipe.ingredients.map((i) => ingredientRowHTML({
+      if (initial?.ingredients?.length) {
+        ingList.insertAdjacentHTML('beforeend', initial.ingredients.map((i) => ingredientRowHTML({
           name: i.name,
           quantity: i.quantity ?? '',
           category: i.category ?? DEFAULT_CATEGORY_NAME,

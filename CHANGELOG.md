@@ -7,7 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Calendar recovery preserves newer deliberate changes after Reload.** Full
+  editor submissions merge unchanged authoritative fields, moves keep absolute
+  targets and resizing keeps the refreshed untouched edge. Conflicting field
+  values can be reviewed explicitly. Missing occurrences retain actionable local
+  changes with a safe Discard action that never deletes the provider resource;
+  complete CalDAV readback removes abandoned optimistic copies when no newer
+  changes remain, using verified DAV responses rather than an empty client result.
+  Review keeps conflicts across separate unsaved edits actionable, asks again
+  when a previously chosen local value conflicts with a new provider change, and
+  presents time boundaries with calendar dates and times or all-day dates.
+  Refreshed fields that no longer conflict keep their local intent and release
+  obsolete choices, allowing the remaining conflicts to be resolved.
+
 ### Added
+
+- **Recipes can be imported from the five most-used German recipe sites.** A
+  supported URL fills the title, ingredients, preparation steps and source link
+  into the existing recipe form for review. For any other site, Yuvomi builds a
+  copyable prompt for a regular LLM chat and accepts the returned JSON in the
+  same import dialog.
+
+- **Calendar events can be moved and resized with a mouse** on a 15-minute grid.
+  Recurring edits offer one occurrence, this and following occurrences, or the
+  whole series. Calendar permissions, pending synchronization, conflicts, and
+  retry status are shown alongside the existing event editor.
 
 - **A shopping item can carry a price and the shop it was bought at** (#1003, first cut). Both sit
   in the item dialog, where the item is already open - the checkbox stays the fastest gesture in the
@@ -133,6 +159,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The delete dialog is unchanged: "Delete entire series" already says it.
 
 ### Fixed
+
+- **Recurring calendar edits recover safely after provider conflicts and interrupted synchronization.**
+  Repeated Google occurrence edits use the occurrence revision. Following-series
+  splits retain CalDAV cancellations and resume accepted writes without duplicate
+  continuations, including cancellations when converting between timed and
+  all-day. Reload preserves newer continuation edits through authoritative tail
+  recovery and adopts accepted exception identities without duplicate local rows.
+  Nested and detached edits recover their own intent without replaying the
+  rejected split. Recovery retains an existing first-occurrence parent and its
+  reminders, and reports a removed occurrence as an actionable error. Uncertain
+  CalDAV continuations reconcile fetched exception identities before pruning;
+  all-day-to-timed cancellations retain one civil occurrence even in the afternoon.
+  Completed edits store their provider identities atomically.
 
 - **The person filter in the task history is no longer a row of blank buttons on a phone** (#1068).
   Below 640px the label-loss rule removes every `.group-toggle__label`; it is built on the

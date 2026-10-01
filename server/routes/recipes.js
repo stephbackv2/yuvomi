@@ -11,6 +11,7 @@ import { str, num, collectErrors, MAX_TITLE, MAX_TEXT, MAX_SHORT } from '../midd
 import { normalizeRecipeMealTypes } from '../../public/utils/recipe-meal-types.js';
 import { getAdapter } from '../services/recipe-providers/index.js';
 import { dataUrlContentMatches } from '../utils/file-signature.js';
+import { importRecipeFromUrl } from '../services/recipe-import.js';
 
 const log = createLogger('Recipes');
 const router = express.Router();
@@ -60,6 +61,32 @@ function loadRecipeWithIngredients(id) {
 
   return withSource({ ...recipe, meal_types: normalizeRecipeMealTypes(recipe.meal_types), ingredients });
 }
+
+/**
+ * Reads a supported public recipe page and returns a draft. Nothing is stored
+ * here: the normal create form remains the review and confirmation step.
+ */
+router.post('/import/preview', async (req, res) => {
+  try {
+    const draft = await importRecipeFromUrl({
+      sourceId: req.body?.source,
+      rawUrl: req.body?.url,
+    });
+    res.json({ data: draft });
+  } catch (err) {
+    const badInput = new Set(['UNSUPPORTED_SOURCE', 'INVALID_URL', 'SOURCE_MISMATCH']);
+    const unprocessable = new Set(['NO_RECIPE_DATA']);
+    const status = badInput.has(err.code) ? 400
+      : unprocessable.has(err.code) ? 422
+        : err.code === 'PAGE_TOO_LARGE' ? 413 : 502;
+    if (status === 502) log.warn('Recipe URL import failed:', err);
+    res.status(status).json({
+      error: err.message || 'Recipe import failed.',
+      reason: err.code || 'FETCH_FAILED',
+      code: status,
+    });
+  }
+});
 
 router.get('/', (_req, res) => {
   try {

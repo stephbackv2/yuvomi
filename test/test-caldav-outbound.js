@@ -28,7 +28,15 @@ import assert from 'node:assert/strict';
 const dbmod = await import('../server/db.js');
 const db = dbmod.get();
 const outbound = await import('../server/services/calendar-outbound.js');
-const { processPendingDeletions, processPendingUpdates, icsFieldsForEvent, filenameFromUrl } =
+const {
+  processPendingDeletions,
+  processPendingUpdates,
+  processScopedOperation,
+  patchICSEventOccurrence,
+  caldavWriteCapability,
+  icsFieldsForEvent,
+  filenameFromUrl,
+} =
   await import('../server/services/caldav-outbound.js');
 const { patchICSEvent, countVEvents, unfoldICS, foldICSLine } =
   await import('../server/utils/ics-patch.js');
@@ -39,6 +47,7 @@ const { nearestIcalColorName, resolveIcalColor, __test: icalColorTest } =
 // zu gross ist, um ihn fuer eine Property nachzustellen.
 const { __test: caldavSyncTest } = await import('../server/services/caldav-sync.js');
 const { __test: appleSyncTest }  = await import('../server/services/apple-calendar.js');
+const editOperations = await import('../server/services/calendar-edit-operations.js');
 
 db.prepare("INSERT INTO users (username, display_name, password_hash, role) VALUES ('admin','Admin','x','admin')").run();
 
@@ -49,6 +58,7 @@ const CAL2_URL = 'https://dav.example/cal/work/';
 
 function reset() {
   db.prepare('DELETE FROM calendar_pending_deletions').run();
+  db.prepare('DELETE FROM calendar_edit_operations').run();
   db.prepare('DELETE FROM calendar_events').run();
   db.prepare('DELETE FROM external_calendars').run();
   db.prepare('DELETE FROM caldav_accounts').run();
@@ -1177,4 +1187,335 @@ test('patchICSEvent setzt genau ein RRULE-Präfix, egal welche Schreibweise anko
     const lines = out.split('\r\n').filter((l) => /^RRULE/i.test(l));
     assert.deepEqual(lines, ['RRULE:FREQ=DAILY;INTERVAL=2'], `Eingabe: ${rule}`);
   }
+});
+
+// ── Durable scoped provider operations ──────────────────────────────────────────
+
+function scopedCalDAVOperation({ scope = 'this', uid = 'series@t', occurrenceStart = '2035-03-17T09:00', after = {}, split = null, provider = null } = {}) {
+  const next = {
+    title: 'Neue Ausnahme', description: null, location: null, color: null,
+    start_datetime: '2035-03-17T12:00', end_datetime: '2035-03-17T13:00',
+    all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin', ...after,
+  };
+  return {
+    id: 1,
+    source: 'caldav',
+    scope,
+    occurrence_start: occurrenceStart,
+    payload_json: JSON.stringify({
+      source: 'caldav', scope, occurrence_start: occurrenceStart,
+      before: { ...next, title: 'Vorher' }, after: next,
+      master_external_id: uid, target_calendar_id: CAL_URL,
+      ...(provider ? { provider } : {}),
+      ...(split ? { split } : {}),
+    }),
+  };
+}
+
+test('CalDAV this edit patches only the original override and preserves the master', async () => {
+  const uid = 'scoped@t';
+  const data = serverObject(uid, { withOverride: true });
+  const updates = [];
+  const creates = [];
+  const client = {
+    updateCalendarObject: async (params) => { updates.push(params); },
+    createCalendarObject: async (params) => {
+      creates.push(params);
+      return { etag: '"continuation-v1"' };
+    },
+  };
+  const operation = scopedCalDAVOperation({ uid });
+
+  assert.equal(caldavWriteCapability({ url: CAL_URL, writable: true }).writable, true);
+  await processScopedOperation(
+    client,
+    operation,
+    indexFor(uid, { data, etag: '"v1"', calendarUrl: CAL_URL }),
+    new Map([[CAL_URL, { url: CAL_URL, writable: true }]]),
+  );
+
+  assert.equal(updates.length, 1);
+  assert.equal(updates[0].calendarObject.etag, '"v1"');
+  const sent = updates[0].calendarObject.data;
+  const blocks = unfoldICS(sent).split('\n');
+  const masterStart = blocks.indexOf('BEGIN:VEVENT');
+  const masterEnd = blocks.indexOf('END:VEVENT', masterStart);
+  const overrideStart = blocks.indexOf('BEGIN:VEVENT', masterEnd + 1);
+  const overrideEnd = blocks.indexOf('END:VEVENT', overrideStart);
+  const master = blocks.slice(masterStart, masterEnd + 1).join('\n');
+  const override = blocks.slice(overrideStart, overrideEnd + 1).join('\n');
+  assert.match(master, /SUMMARY:Alter Titel/);
+  assert.match(override, /SUMMARY:Neue Ausnahme/);
+  assert.match(override, /DTSTART;TZID=Europe\/Berlin:20350317T120000/);
+  assert.match(master, /ATTENDEE;CN=Maria/);
+  assert.match(master, /BEGIN:VALARM/);
+});
+
+test('CalDAV detached edits keep the synthetic local identity out of VEVENT UID', async () => {
+  const uid = 'detached@t';
+  const occurrenceUid = `${uid}::2035-03-17`;
+  let source = serverObject(uid, { withOverride: true });
+  const writes = [];
+  const client = {
+    updateCalendarObject: async ({ calendarObject }) => {
+      const uidLines = unfoldICS(calendarObject.data).split('\n')
+        .filter((line) => /^UID:/i.test(line));
+      assert.deepEqual([...new Set(uidLines)], [`UID:${uid}`]);
+      assert.doesNotMatch(calendarObject.data, /UID:detached@t::2035-03-17/);
+      writes.push(calendarObject.data);
+      return { etag: `"v${writes.length + 1}"` };
+    },
+  };
+  const operation = scopedCalDAVOperation({
+    uid,
+    provider: { uid: occurrenceUid, masterUid: uid, occurrenceUid, etag: '"v1"' },
+  });
+
+  const index = () => indexFor(uid, { data: source, etag: '"v1"' });
+  const first = await processScopedOperation(
+    client, operation, index(), new Map([[CAL_URL, { url: CAL_URL, writable: true }]]),
+  );
+  assert.equal(first.providerUid, occurrenceUid, 'the local exception remains traceable');
+  source = writes[0];
+  operation.payload_json = JSON.stringify({
+    ...JSON.parse(operation.payload_json),
+    after: {
+      ...JSON.parse(operation.payload_json).after,
+      title: 'Dritte Bearbeitung',
+    },
+  });
+  await processScopedOperation(
+    client, operation, index(), new Map([[CAL_URL, { url: CAL_URL, writable: true }]]),
+  );
+  assert.equal(writes.length, 2, 'a later scoped edit still patches the same resource');
+});
+
+test('CalDAV rejects a mixed-UID source instead of writing a corrupt resource', async () => {
+  const uid = 'mixed@t';
+  const invalid = `${serverObject(uid)}\r\nBEGIN:VEVENT\r\nUID:other@t\r\nSUMMARY:foreign\r\nEND:VEVENT`;
+  let writes = 0;
+  await assert.rejects(
+    () => processScopedOperation(
+      { updateCalendarObject: async () => { writes++; } },
+      scopedCalDAVOperation({ uid }),
+      indexFor(uid, { data: invalid }),
+      new Map([[CAL_URL, { url: CAL_URL, writable: true }]]),
+    ),
+    (error) => error.code === 400 && error.permanent === true,
+  );
+  assert.equal(writes, 0);
+});
+
+test('CalDAV scoped write refuses an explicitly read-only calendar', async () => {
+  const operation = scopedCalDAVOperation({ uid: 'readonly@t' });
+  const client = { updateCalendarObject: async () => { throw new Error('must not write'); } };
+  await assert.rejects(
+    () => processScopedOperation(
+      client,
+      operation,
+      indexFor('readonly@t', { data: serverObject('readonly@t'), calendarUrl: CAL_URL }),
+      new Map([[CAL_URL, { url: CAL_URL, readOnly: true }]]),
+    ),
+    (error) => error.code === 403 && error.readOnly === true,
+  );
+});
+
+test('CalDAV following split moves later exceptions and is idempotent on retry', async () => {
+  const uid = 'following@t';
+  const data = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Example//EN',
+    'BEGIN:VEVENT', `UID:${uid}`, 'DTSTAMP:20260101T090000Z', 'SEQUENCE:3',
+    'SUMMARY:Serie', 'DTSTART;TZID=Europe/Berlin:20350310T090000',
+    'DTEND;TZID=Europe/Berlin:20350310T100000', 'RRULE:FREQ=WEEKLY',
+    'ATTENDEE;CN=Maria:mailto:maria@example.com',
+    'END:VEVENT',
+    'BEGIN:VEVENT', `UID:${uid}`, 'RECURRENCE-ID;TZID=Europe/Berlin:20350317T090000',
+    'SUMMARY:Vorher verschoben', 'DTSTART;TZID=Europe/Berlin:20350317T110000',
+    'DTEND;TZID=Europe/Berlin:20350317T120000', 'END:VEVENT',
+    'BEGIN:VEVENT', `UID:${uid}`, 'RECURRENCE-ID;TZID=Europe/Berlin:20350324T090000',
+    'SUMMARY:Nachher verschoben', 'DTSTART;TZID=Europe/Berlin:20350324T130000',
+    'DTEND;TZID=Europe/Berlin:20350324T140000',
+    'ATTENDEE;CN=Maria:mailto:maria@example.com', 'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+  const split = {
+    master_after: {
+      title: 'Serie', start_datetime: '2035-03-10T09:00', end_datetime: '2035-03-10T10:00',
+      all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY;UNTIL=20350323', tzid: 'Europe/Berlin',
+    },
+    new_master: {
+      title: 'Neue Serie', start_datetime: '2035-03-24T11:00', end_datetime: '2035-03-24T12:00',
+      all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin',
+    },
+    exception_operations: [{
+      local_event_id: 42,
+      original_start: '2035-03-24T09:00',
+      continuation_start: '2035-03-24T11:00',
+    }],
+    // The backend may also provide the raw component after a read-back. It is
+    // the same moved exception and must not be duplicated in the new resource.
+    exception_components: [
+      'BEGIN:VEVENT\r\nUID:following@t.yuvomi-following-20350324T090000\r\nRECURRENCE-ID;TZID=Europe/Berlin:20350324T110000\r\nSUMMARY:Nachher verschoben\r\nDTSTART;TZID=Europe/Berlin:20350324T130000\r\nDTEND;TZID=Europe/Berlin:20350324T140000\r\nEND:VEVENT',
+    ],
+  };
+  const operation = scopedCalDAVOperation({
+    scope: 'following', uid, occurrenceStart: '2035-03-24T09:00', split,
+  });
+  const updates = [];
+  const creates = [];
+  const client = {
+    updateCalendarObject: async (params) => { updates.push(params); },
+    createCalendarObject: async (params) => {
+      creates.push(params);
+      return { etag: '"continuation-v1"' };
+    },
+  };
+  const calendars = new Map([[CAL_URL, { url: CAL_URL, writable: true }]]);
+
+  const firstResult = await processScopedOperation(
+    client, operation, indexFor(uid, { data, etag: '"v1"' }), calendars,
+  );
+  assert.equal(firstResult.exceptionOperations.length, 1);
+  assert.equal(firstResult.exceptionOperations[0].localEventId, 42);
+  assert.equal(updates.length, 1, 'the old master is truncated in its original resource');
+  assert.equal(creates.length, 1, 'the continuation is a distinct CalDAV resource');
+  const oldResource = updates[0].calendarObject.data;
+  const continuation = creates[0].iCalString;
+  const newUid = 'following@t.yuvomi-following-20350324T090000';
+  assert.doesNotMatch(oldResource, new RegExp(`UID:${newUid}`));
+  assert.match(oldResource, /UID:following@t/);
+  assert.equal(countVEvents(oldResource), 2, 'old resource keeps only the master and earlier exception');
+  assert.match(continuation, new RegExp(`UID:${newUid}`));
+  assert.doesNotMatch(continuation, /UID:following@t\r?\n/);
+  assert.equal(countVEvents(continuation), 2, 'continuation resource has its master and moved exception');
+  assert.equal(creates[0].filename, `${encodeURIComponent(newUid)}.ics`);
+  assert.equal(firstResult.exceptionOperations[0].providerUid,
+    `${newUid}::2035-03-24`);
+  assert.equal(firstResult.exceptionOperations[0].providerEtag, '"continuation-v1"');
+  assert.match(oldResource, /RRULE:FREQ=WEEKLY;UNTIL=20350323/);
+  assert.match(continuation, /SUMMARY:Nachher verschoben/);
+  assert.match(continuation, /RECURRENCE-ID;TZID=Europe\/Berlin:20350324T110000/);
+  assert.match(continuation, /DTSTART;TZID=Europe\/Berlin:20350324T130000/);
+
+  // A retry resumes from the provider progress checkpoint. It must not PUT the
+  // old resource again or create a second continuation resource.
+  operation.progress = firstResult.providerProgress;
+  await processScopedOperation(
+    client,
+    operation,
+    indexFor(uid, { data: oldResource, etag: '"v2"' }),
+    calendars,
+  );
+  assert.equal(updates.length, 1);
+  assert.equal(creates.length, 1);
+});
+
+test('CalDAV following queue resumes after old-resource success and continuation failure', async () => {
+  reset();
+  const uid = 'queued-following@t';
+  const calRefId = upsertCalendar(CAL_URL);
+  const event = insertSyncedEvent({
+    uid, calRefId, objectUrl: `${CAL_URL}${uid}.ics`, target: CAL_URL,
+    recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin',
+  });
+  const split = {
+    master_after: {
+      title: 'Serie', start_datetime: '2035-03-10T09:00', end_datetime: '2035-03-10T10:00',
+      all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY;UNTIL=20350323', tzid: 'Europe/Berlin',
+    },
+    new_master: {
+      title: 'Neue Serie', start_datetime: '2035-03-24T11:00', end_datetime: '2035-03-24T12:00',
+      all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin',
+    },
+    exception_operations: [{
+      local_event_id: 42, original_start: '2035-03-24T09:00', continuation_start: '2035-03-24T11:00',
+    }],
+  };
+  const source = [
+    'BEGIN:VCALENDAR', 'VERSION:2.0',
+    'BEGIN:VEVENT', `UID:${uid}`, 'DTSTAMP:20260101T090000Z', 'SEQUENCE:3',
+    'SUMMARY:Serie', 'DTSTART;TZID=Europe/Berlin:20350310T090000',
+    'DTEND;TZID=Europe/Berlin:20350310T100000', 'RRULE:FREQ=WEEKLY', 'END:VEVENT',
+    'BEGIN:VEVENT', `UID:${uid}`, 'RECURRENCE-ID;TZID=Europe/Berlin:20350324T090000',
+    'SUMMARY:Später', 'DTSTART;TZID=Europe/Berlin:20350324T130000',
+    'DTEND;TZID=Europe/Berlin:20350324T140000', 'END:VEVENT',
+    'END:VCALENDAR',
+  ].join('\r\n');
+  const template = scopedCalDAVOperation({ scope: 'following', uid, occurrenceStart: '2035-03-24T09:00', split });
+  const operationId = editOperations.queueCalendarEditOperation({
+    eventId: event.id, source: 'caldav', scope: 'following',
+    occurrenceStart: '2035-03-24T09:00', payload: JSON.parse(template.payload_json),
+  }, db);
+  assert.ok(operationId);
+
+  let createAttempts = 0;
+  const updates = [];
+  const creates = [];
+  const client = {
+    updateCalendarObject: async ({ calendarObject }) => {
+      updates.push(calendarObject);
+      return { etag: '"old-v2"' };
+    },
+    createCalendarObject: async (params) => {
+      createAttempts++;
+      creates.push(params);
+      if (createAttempts === 1) throw httpError(503);
+      return { etag: '"new-v1"', url: `${CAL_URL}queued-following-new.ics` };
+    },
+  };
+  const calendars = new Map([[CAL_URL, { url: CAL_URL, writable: true }]]);
+  const first = await caldavSyncTest.processScopedOperations(
+    client, indexFor(uid, { data: source, etag: '"old-v1"' }), calendars, new Set([CAL_URL]),
+  );
+  assert.equal(first.retry, 1);
+  assert.equal(updates.length, 1);
+  assert.equal(creates.length, 1);
+  const afterFailure = db.prepare(
+    'SELECT status, progress_json FROM calendar_edit_operations WHERE id = ?',
+  ).get(operationId);
+  assert.equal(afterFailure.status, 'retry');
+  const progress = JSON.parse(afterFailure.progress_json);
+  assert.equal(progress.old_master.accepted, true);
+  assert.equal(progress.continuation_master.accepted, undefined);
+
+  const oldResource = updates[0].data;
+  const second = await caldavSyncTest.processScopedOperations(
+    client, indexFor(uid, { data: oldResource, etag: '"old-v2"' }), calendars, new Set([CAL_URL]),
+  );
+  assert.equal(second.completed, 1);
+  assert.equal(updates.length, 1, 'accepted old resource is not overwritten on retry');
+  assert.equal(creates.length, 2, 'the failed create is retried once');
+  assert.equal(db.prepare('SELECT status FROM calendar_edit_operations WHERE id = ?').get(operationId).status, 'completed');
+  assert.equal(reload(event.id).external_calendar_id, 'queued-following@t.yuvomi-following-20350324T090000');
+});
+
+test('Apple scoped consumer uses the fenced CalDAV adapter completion path', async () => {
+  reset();
+  const appleRefId = db.prepare(`
+    INSERT INTO external_calendars (source, external_id, name, color)
+    VALUES ('apple', ?, 'iCloud', '#FC3C44') RETURNING id
+  `).get(CAL_URL).id;
+  const event = insertSyncedEvent({
+    uid: 'apple-scoped@t', source: 'apple', calRefId: appleRefId,
+    objectUrl: `${CAL_URL}apple-scoped.ics`, target: CAL_URL,
+  });
+  const template = scopedCalDAVOperation({ uid: 'apple-scoped@t' });
+  const payload = JSON.parse(template.payload_json);
+  payload.source = 'apple';
+  const operationId = editOperations.queueCalendarEditOperation({
+    eventId: event.id, source: 'apple', scope: 'this',
+    occurrenceStart: '2035-03-17T09:00', payload,
+  }, db);
+  const client = {
+    updateCalendarObject: async () => ({ etag: '"apple-v2"' }),
+  };
+  const result = await appleSyncTest.processScopedAppleOperations(
+    client,
+    indexFor('apple-scoped@t', { data: serverObject('apple-scoped@t') }),
+    new Map([[CAL_URL, { url: CAL_URL, writable: true }]]),
+  );
+  assert.deepEqual(result, { completed: 1, retry: 0, error: 0, conflict: 0 });
+  assert.equal(db.prepare('SELECT status FROM calendar_edit_operations WHERE id = ?').get(operationId).status, 'completed');
+  assert.equal(reload(event.id).external_source, 'apple');
+  assert.equal(reload(event.id).provider_revision, '"apple-v2"');
 });

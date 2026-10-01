@@ -69,6 +69,12 @@ test('GET /: leere Sammlung → leeres Array', async () => {
   assert.deepEqual(r.body.data, []);
 });
 
+test('POST /import/preview: unbekannte Quelle wird ohne Netzwerkzugriff abgelehnt', async () => {
+  const r = await call('POST', '/import/preview', { source: 'other', url: 'https://example.org/recipe' });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.reason, 'UNSUPPORTED_SOURCE');
+});
+
 // --------------------------------------------------------------------------
 // POST / (Anlegen + Validierung + Zutaten-Regeln)
 // --------------------------------------------------------------------------

@@ -23,6 +23,14 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 
 const MIN_LENGTH = 13; // Werte ab 13 Zeichen zaehlen
+// This fork requires DE/EN only for the approved recovery correction. Keep the
+// detector and all unrelated baseline counts intact (docs/fork-preferences.md).
+const FORK_RECOVERY_ENGLISH_KEYS = new Set([
+  'calendar.recoveryReview', 'calendar.recoveryDiscard', 'calendar.recoveryDiscarded',
+  'calendar.recoveryOriginal', 'calendar.recoveryConflict', 'calendar.recoveryUnavailable',
+  'calendar.recoveryChoose', 'calendar.recoveryKeepLocal', 'calendar.recoveryKeepProvider',
+  'calendar.recoveryEmpty', 'calendar.recoveryField',
+]);
 const BASELINE_URL = new URL('./i18n-translated-baseline.json', import.meta.url);
 const SETS = {
   app: new URL('../public/locales/', import.meta.url),
@@ -81,7 +89,7 @@ for (const [setName, dir] of Object.entries(SETS)) {
   for (const [code, values] of locales) {
     if (code === 'de' || code === 'en') continue;
     const expected = baseline[setName]?.[code];
-    const hits = copiedFromEnglish(de, en, values);
+    const hits = copiedFromEnglish(de, en, values).filter((key) => setName !== 'app' || !FORK_RECOVERY_ENGLISH_KEYS.has(key));
 
     test(`${setName}/${code}: keine neuen englischen Werte gegenueber der Baseline`, () => {
       assert.ok(Number.isInteger(expected), `${setName}/${code} fehlt in der Baseline - Eintrag mit ${hits.length} anlegen`);

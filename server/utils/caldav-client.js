@@ -1,4 +1,58 @@
 // --------------------------------------------------------
+
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+/** Validate with the XML engine already installed by tsdav's XML converter. */
+async function completeDavMultistatus(text) {
+  // xml-js suppresses its parser's errors; use the same engine directly so
+  // truncated XML cannot masquerade as an authoritative empty collection.
+  const resolve = createRequire(import.meta.url).resolve;
+  const resolveDav = createRequire(resolve('tsdav')).resolve;
+  const resolveXml = createRequire(resolveDav('xml-js')).resolve;
+  const { default: sax } = await import(pathToFileURL(resolveXml('sax')).href);
+  const parser = sax.parser(true, { xmlns: true, strictEntities: true });
+  let depth = 0; let root = false; let complete = true;
+  let response = null; let status = null;
+  parser.onerror = (error) => { throw error; };
+  parser.onopentag = (node) => {
+    if (depth === 0) {
+      if (root || node.uri !== 'DAV:' || node.local !== 'multistatus') complete = false;
+      root = true;
+    } else if (depth === 1 && (node.uri !== 'DAV:' || !['response', 'responsedescription'].includes(node.local))) {
+      complete = false;
+    }
+    if (depth === 1 && node.uri === 'DAV:' && node.local === 'response') response = { href: false, status: false };
+    if (depth === 2 && response) {
+      if (node.uri !== 'DAV:' || !['href', 'status', 'propstat', 'error', 'responsedescription', 'location'].includes(node.local)) complete = false;
+      if (node.local === 'href') response.href = true;
+    }
+    if (node.uri === 'DAV:' && node.local === 'status') {
+      status = { depth: depth + 1, text: '' };
+      if (response) response.status = true;
+    }
+    if (node.uri === 'DAV:' && node.local === 'error') complete = false;
+    depth++;
+  };
+  parser.onclosetag = () => {
+    if (status?.depth === depth) {
+      if (!/^HTTP\/\d+(?:\.\d+)?\s+2\d\d(?:\s|$)/.test(status.text.trim())) complete = false;
+      status = null;
+    }
+    if (depth === 2 && response) {
+      if (!response.href || !response.status) complete = false;
+      response = null;
+    }
+    depth--;
+  };
+  parser.ontext = (value) => {
+    if (depth === 0 && value.trim()) complete = false;
+    if (status) status.text += value;
+  };
+  parser.ondoctype = () => { complete = false; };
+  try { parser.write(text).close(); } catch { return false; }
+  return root && complete && depth === 0;
+}
 // tsdav-Client für ein caldav_accounts-Konto.
 //
 // Termine (caldav-sync.js), VTODO-Inbound (caldav-reminders-sync.js) und der
@@ -106,10 +160,34 @@ export function withCalendarObjectUrlFilter(client) {
   return Object.create(Object.getPrototypeOf(client), {
     ...Object.getOwnPropertyDescriptors(client),
     fetchCalendarObjects: {
-      value: (params = {}) => fetchCalendarObjects({
-        urlFilter: calendarObjectUrlFilter(params?.calendar?.url),
-        ...params,
-      }),
+      value: async (params = {}) => {
+        const { davRequest } = await import('tsdav');
+        const urlFilter = params.urlFilter || calendarObjectUrlFilter(params?.calendar?.url);
+        const reports = [];
+        const requestFetch = params.fetch || globalThis.fetch;
+        const objects = await fetchCalendarObjects({ urlFilter, ...params, fetch: async (url, options) => {
+          const response = await requestFetch(url, options);
+          const text = await response.clone().text();
+          // Reuse the installed DAV parser, retaining its response provenance
+          // before fetchCalendarObjects flattens insufficient replies into [].
+          const parsed = await davRequest({ url, init: { method: 'REPORT' }, fetch: async () => response.clone() });
+          reports.push({ parsed, complete: response.status === 207 && await completeDavMultistatus(text)
+            && /xml/i.test(response.headers.get('content-type') || '')
+            && parsed.every((item) => item.ok && !item.error && (!item.raw || (item.raw.multistatus && item.href))) });
+          return response;
+        } });
+        const query = reports[0];
+        const expected = query?.parsed.filter((item) => item.href && urlFilter(new URL(item.href, params.calendar.url).href)) || [];
+        const key = (url) => new URL(url, params.calendar.url).href;
+        objects.complete = !params.objectUrls && !params.timeRange && !params.filters && !params.urlFilter
+          && reports.length > 0 && reports.every((report) => report.complete)
+          && expected.every((item) => item.props?.getetag != null)
+          && expected.length === objects.length
+          && new Set(objects.map((item) => key(item.url))).size === objects.length
+          && expected.every((item) => objects.some((object) => key(object.url) === key(item.href)
+            && object.etag != null && typeof object.data === 'string' && object.data.length > 0));
+        return objects;
+      },
       writable: true, enumerable: true, configurable: true,
     },
   });

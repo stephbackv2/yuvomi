@@ -11,6 +11,7 @@ import { contentMatchesMime } from '../../utils/file-signature.js';
 import {
   fanOutEventReminders, dropInheritedEventReminders, eventAuthorId,
 } from '../../services/event-reminder-fanout.js';
+import { eventEditMetadata } from '../../services/calendar-edit-metadata.js';
 
 export const VALID_SOURCES  = ['local', 'google', 'apple', 'ics'];
 // Ein Termin-Anhang ist ein Upload wie jeder andere und teilt deshalb die
@@ -261,7 +262,7 @@ export function setEventAssignments(d, eventId, userIds) {
   );
 }
 
-export function serializeEvent(event) {
+export function serializeEvent(event, database = null) {
   if (!event) return event;
   const assigned_users = event.assigned_users_json ? JSON.parse(event.assigned_users_json) : [];
   // birthday_name/birthday_date stammen aus dem LEFT JOIN auf birthdays und sind
@@ -277,7 +278,7 @@ export function serializeEvent(event) {
     ...rest
   } = event;
   const documentId = event.attachment_document_id ?? null;
-  return {
+  const serialized = {
     ...rest,
     ...(birthday_name ? {
       birthday_name,
@@ -296,6 +297,8 @@ export function serializeEvent(event) {
       : null,
     housekeeping_visit_id: event.housekeeping_visit_id ?? null,
   };
+  if (database) Object.assign(serialized, eventEditMetadata(database, event));
+  return serialized;
 }
 
 export function sendStorageError(res, error, fallbackMessage) {

@@ -23,6 +23,7 @@ import crudRouter from './calendar/crud.js';
 import caldavRouter from './calendar/caldav.js';
 import outlookRouter from './calendar/outlook.js';
 import syncTargetsRouter from './calendar/sync-targets.js';
+import editRouter from './calendar/edit.js';
 import { googleTarget } from './calendar/helpers.js';
 
 const router = express.Router();
@@ -33,6 +34,8 @@ router.use(appleRouter);
 router.use(subscriptionsRouter);
 router.use(feedRouter);
 router.use(syncTargetsRouter);
+// Scoped gesture/editor paths must run before the compatibility CRUD router.
+router.use(editRouter);
 router.use(crudRouter);
 router.use(caldavRouter);
 // Outlook nutzt wie CalDAV ausschließlich Mehr-Segment-Pfade (/outlook/...)

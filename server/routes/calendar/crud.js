@@ -16,6 +16,9 @@ import {
   stageDocumentUpload,
 } from '../../services/document-storage.js';
 import { queueEventDeletion, markEventOutbound, flushOutbound } from '../../services/calendar-outbound.js';
+import { checkRevision } from '../../services/calendar-edit.js';
+import { getEditCapabilities } from '../../services/calendar-edit-metadata.js';
+import { calendarEditSyncForEvent } from '../../services/calendar-edit-operations.js';
 import {
   ASSIGNED_USERS_SQL,
   getUserId,
@@ -75,7 +78,7 @@ router.get('/:id', (req, res) => {
     `).get(id, getUserId(req), getUserId(req));
 
     if (!event) return res.status(404).json({ error: 'Termin nicht gefunden', code: 404 });
-    res.json({ data: serializeEvent(event) });
+    res.json({ data: serializeEvent(event, db.get()) });
   } catch (err) {
     log.error('', err);
     res.status(500).json({ error: 'Interner Fehler', code: 500 });
@@ -219,7 +222,7 @@ router.post('/', async (req, res) => {
       WHERE e.id = ?
     `).get(eventId);
 
-    res.status(201).json({ data: serializeEvent(event) });
+    res.status(201).json({ data: serializeEvent(event, db.get()) });
   } catch (err) {
     if (err instanceof StorageError && !stagedUpload) {
       log.error('POST / storage error:', err);
@@ -271,6 +274,59 @@ router.put('/:id', async (req, res) => {
     const id    = parseInt(req.params.id, 10);
     const event = loadVisibleEvent(id, req);
     if (!event) return res.status(404).json({ error: 'Termin nicht gefunden', code: 404 });
+
+    if (calendarEditSyncForEvent(id, db.get()).recovery) {
+      return res.status(409).json({ error: 'Review or discard retained changes before editing the original event.',
+        code: 409, reason: 'calendar_recovery_required' });
+    }
+
+    // New clients may protect the compatibility PUT with the same opaque
+    // revision token as scoped edits.  Check it before validation or upload so
+    // a stale request cannot leave staged files or partial local state behind.
+    try {
+      checkRevision(event, req.body?.expected_revision);
+    } catch (error) {
+      if (error?.conflict) {
+        return res.status(409).json({
+          error: error.message,
+          code: 409,
+          conflict: error.conflict,
+        });
+      }
+      throw error;
+    }
+
+    // A provider calendar can be visible and selected while its individual
+    // collection is read-only.  Refuse before attachment staging or the local
+    // UPDATE.  Synthetic external rows without a remote identity retain the
+    // historical local PUT behaviour.
+    const capabilities = getEditCapabilities(db.get(), event);
+    if (!capabilities.editable) {
+      return res.status(409).json({
+        error: 'This calendar event is read-only.',
+        code: 409,
+        reason: capabilities.read_only_reason,
+        data: { edit_capabilities: capabilities },
+      });
+    }
+
+    // Apple keeps the ordinary single-event editor while its scoped adapter
+    // remains unavailable.  A recurrence change on an existing Apple series
+    // is nevertheless a series operation; refuse it here so an API client
+    // cannot bypass the editor's explicit unsupported-scope guard.  Creating
+    // a recurrence on an ordinary one-off event remains a valid legacy save.
+    const appleSeriesRuleChange = event.external_source === 'apple'
+      && !!event.recurrence_rule
+      && req.body.recurrence_rule !== undefined
+      && String(req.body.recurrence_rule || '') !== String(event.recurrence_rule || '');
+    if (appleSeriesRuleChange) {
+      return res.status(409).json({
+        error: 'This provider does not support scoped recurrence edits.',
+        code: 409,
+        reason: 'provider_scope_unsupported',
+        data: { edit_capabilities: capabilities },
+      });
+    }
 
     const checks = [];
     if (req.body.title          !== undefined) checks.push(str(req.body.title, 'Titel', { max: MAX_TITLE, required: false }));
@@ -585,7 +641,18 @@ router.put('/:id', async (req, res) => {
     // Wie beim Löschen: vormerken, antworten, danach best effort ausführen.
     const pending = markEventOutbound(event, updated);
 
-    res.json({ data: serializeEvent(updated) });
+    // The outbound marker is written after the main update so the intent
+    // cannot be lost. That marker write also advances the opaque edit
+    // revision; refresh the response state before serializing it, otherwise
+    // the next editor save immediately conflicts with the token just issued.
+    const responseState = db.get().prepare(`
+      SELECT edit_revision, sync_state, sync_error,
+             outbound_dirty, outbound_attempts, outbound_move_to, updated_at
+      FROM calendar_events WHERE id = ?
+    `).get(id);
+    if (responseState) Object.assign(updated, responseState);
+
+    res.json({ data: serializeEvent(updated, db.get()) });
 
     if (pending) {
       flushOutbound()
@@ -702,6 +769,9 @@ router.delete('/:id', (req, res) => {
     const id    = parseInt(req.params.id, 10);
     const event = loadVisibleEvent(id, req);
     if (!event) return res.status(404).json({ error: 'Termin nicht gefunden', code: 404 });
+    const recovery = calendarEditSyncForEvent(id, db.get()).recovery;
+    if (recovery) return res.status(409).json({ error: 'Discard unsaved recovery changes with the local discard action.',
+      code: 409, reason: 'calendar_recovery_required' });
     const queued = queueEventDeletion(event);
 
     const result = db.get().prepare('DELETE FROM calendar_events WHERE id = ?').run(id);

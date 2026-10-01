@@ -2148,3 +2148,102 @@
   flex: 0 0 auto;
   opacity: .82;
 }
+
+/* --------------------------------------------------------
+ * Direct manipulation
+ * -------------------------------------------------------- */
+[data-calendar-direct-event] {
+  user-select: none;
+}
+
+[data-calendar-direct-event].month-day__event,
+[data-calendar-direct-event].allday-event {
+  position: relative;
+}
+
+[data-calendar-direct-event].is-calendar-dragging {
+  background: color-mix(in srgb, var(--ev-color) var(--tint-raised), var(--color-surface-work));
+  cursor: grabbing;
+}
+
+.calendar-resize-handle {
+  position: absolute;
+  z-index: 3;
+  display: block;
+  background: transparent;
+  touch-action: none;
+}
+
+.calendar-resize-handle--start,
+.calendar-resize-handle--end {
+  pointer-events: auto;
+}
+
+.month-day__event .calendar-resize-handle--start,
+.month-day__event .calendar-resize-handle--end,
+.allday-event .calendar-resize-handle--start,
+.allday-event .calendar-resize-handle--end {
+  inset-block: 0;
+  width: var(--space-3);
+  cursor: ew-resize;
+}
+
+.month-day__event .calendar-resize-handle--start,
+.allday-event .calendar-resize-handle--start {
+  inset-inline-start: 0;
+}
+
+.month-day__event .calendar-resize-handle--end,
+.allday-event .calendar-resize-handle--end {
+  inset-inline-end: 0;
+}
+
+.week-event .calendar-resize-handle--start,
+.week-event .calendar-resize-handle--end,
+.day-event .calendar-resize-handle--start,
+.day-event .calendar-resize-handle--end {
+  inset-inline: 0;
+  height: var(--space-3);
+  cursor: ns-resize;
+}
+
+.week-event .calendar-resize-handle--start,
+.day-event .calendar-resize-handle--start {
+  inset-block-start: 0;
+}
+
+.week-event .calendar-resize-handle--end,
+.day-event .calendar-resize-handle--end {
+  inset-block-end: 0;
+}
+
+.calendar-drag-notice {
+  position: fixed;
+  inset-block-start: var(--space-4);
+  inset-inline: 50%;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-elevated);
+  color: var(--color-text-primary);
+  box-shadow: var(--shadow-lg);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.calendar-sync-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.calendar-sync-status--pending {
+  color: var(--color-warning);
+}
+
+.calendar-sync-status--error {
+  color: var(--color-danger);
+}

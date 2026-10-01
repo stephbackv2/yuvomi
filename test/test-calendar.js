@@ -571,23 +571,23 @@ test('clickedTime: Klick auf Spaltenanfang ergibt 00:00', () => {
   assert(clickedTime({ clientY: 0 }, colAt(0)) === '00:00', 'yOffset 0 → 00:00');
 });
 
-test('clickedTime: Klick wird auf 30 Minuten gerundet', () => {
+test('clickedTime: Klick wird auf 15 Minuten gerundet', () => {
   const y = (14.5 / 24) * (WEEK_HOUR * 24);
   assert(clickedTime({ clientY: y }, colAt(0)) === '14:30', 'Klick bei 14:30 bleibt 14:30');
 });
 
-test('clickedTime: Minuten zwischen den Rastern runden zum nächsten 30-Minuten-Schritt', () => {
+test('clickedTime: Minuten zwischen den Rastern runden zum nächsten 15-Minuten-Schritt', () => {
   const y = (WEEK_HOUR * 10) + (WEEK_HOUR * 20 / 60);
-  assert(clickedTime({ clientY: y }, colAt(0)) === '10:30', '10:20 rundet auf 10:30');
+  assert(clickedTime({ clientY: y }, colAt(0)) === '10:15', '10:20 rundet auf 10:15');
 });
 
 test('clickedTime: Klick oberhalb der Spalte wird auf 00:00 geklemmt', () => {
   assert(clickedTime({ clientY: 5 }, colAt(50)) === '00:00', 'negativer yOffset → 00:00');
 });
 
-test('clickedTime: Klick am Tagesende wird auf 23:30 geklemmt', () => {
+test('clickedTime: Klick am Tagesende wird auf 23:45 geklemmt', () => {
   const y = WEEK_HOUR * 25;
-  assert(clickedTime({ clientY: y }, colAt(0)) === '23:30', 'yOffset über 24h → 23:30');
+  assert(clickedTime({ clientY: y }, colAt(0)) === '23:45', 'yOffset über 24h → 23:45');
 });
 
 test('clickedTime: berücksichtigt die Scroll-Position der Spalte (rect.top)', () => {

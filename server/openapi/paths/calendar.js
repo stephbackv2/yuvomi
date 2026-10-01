@@ -81,6 +81,71 @@ export function calendarPaths() {
         description: 'Available to every authenticated user (#618). Returns `{ data: { google: [{ id, summary }], caldav: [{ accountId, accountName, calendarUrl, calendarName }] } }`, pre-filtered to enabled (and, for Google, writable) calendars. Carries no credentials, server URLs, or usernames - account management stays admin-only. A provider that cannot be reached yields an empty list instead of failing the request.',
       }),
     },
+    '/api/v1/calendar/{id}/edit-context': {
+      get: op({
+        summary: 'Get scoped calendar edit capabilities and sync context',
+        tag: 'Calendar',
+        params: [idParam()],
+        description: 'Returns the opaque revision token, exact provider write capabilities, known recurrence exceptions, and durable provider sync state. A provider calendar is editable only when its per-calendar rights metadata confirms write access.',
+        responses: {
+          200: {
+            description: 'Calendar edit context',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/CalendarEditContextResponse' } } },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { description: 'Calendar event not found' },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+    },
+    '/api/v1/calendar/{id}/retry-sync': {
+      post: op({
+        summary: 'Retry a failed scoped calendar provider operation',
+        tag: 'Calendar',
+        params: [idParam()],
+        stateChanging: true,
+        description: 'Resets retryable/error scoped operations to pending and starts the normal provider flush. The response reports local event state; it does not claim that a remote write completed.',
+        responses: {
+          200: {
+            description: 'Calendar event with sync state',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/CalendarEventResponse' } } },
+          },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { description: 'Calendar event not found' },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+    },
+    '/api/v1/calendar/{id}/reload-sync': {
+      post: op({
+        summary: 'Discard a provider conflict and reload authoritative calendar data',
+        tag: 'Calendar',
+        params: [idParam()],
+        stateChanging: true,
+        description: 'Accepts an explicit operation_id for a provider 409/412 conflict. The local edit is released from inbound protection and remains pending until the next authoritative provider readback; this endpoint never claims that the stale provider write succeeded or retries it.',
+        requestBody: jsonBody(null),
+        responses: {
+          200: {
+            description: 'Calendar event with authoritative reload pending',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/CalendarEventResponse' } } },
+          },
+          400: { $ref: '#/components/responses/BadRequest' },
+          401: { $ref: '#/components/responses/Unauthorized' },
+          404: { description: 'Calendar event not found' },
+          500: { $ref: '#/components/responses/InternalServerError' },
+        },
+      }),
+    },
+    '/api/v1/calendar/{id}/resolve-recovery': {
+      post: op({ summary: 'Choose local or provider values for retained calendar field conflicts', tag: 'Calendar',
+        params: [idParam()], stateChanging: true, requestBody: jsonBody(null),
+        description: 'Requires a displayed conflicting operation_id, the original event expected_revision, and a nonempty choices map from displayed conflicting fields to local or provider. Choices can span unresolved operations on the same retained event; any unchosen conflict remains actionable. Cancelling the chooser makes no request. Rebuilds only the preserved original range.' }),
+    },
+    '/api/v1/calendar/{id}/discard-recovery': {
+      post: op({ summary: 'Discard retained unsaved calendar changes locally', tag: 'Calendar',
+        params: [idParam()], stateChanging: true, requestBody: jsonBody(null),
+        description: 'Retires and fences retained recovery operations atomically. Removes only retained local changes and never queues a provider DELETE or removes an authoritative provider parent or series. Repeated discard is idempotent.' }),
+    },
     '/api/v1/calendar/caldav/accounts': {
       get: op({ summary: 'List CalDAV accounts', tag: 'Calendar', admin: true }),
       post: op({ summary: 'Create CalDAV account', tag: 'Calendar', admin: true, stateChanging: true, requestBody: jsonBody(null) }),
@@ -148,7 +213,7 @@ export function calendarPaths() {
         tag: 'Calendar',
         params: [idParam()],
         stateChanging: true,
-        description: 'Supports document-storage attachments. Omit attachment fields to preserve the current attachment, send new `attachment_data` to create and link a document, or set `remove_attachment` to true to unlink it without deleting the library document. Legacy events may still return `attachment_data`. Changing a mirrored field (title, description, location, color, all-day, start/end, recurrence) of an event synced to Google pushes the change there, and switching `target_google_calendar_id` moves it to the other Google calendar. The remote call runs after the response and is retried by the next sync run if it fails.',
+        description: 'Supports document-storage attachments. Omit attachment fields to preserve the current attachment, send new `attachment_data` to create and link a document, or set `remove_attachment` to true to unlink it without deleting the library document. Legacy events may still return `attachment_data`. Changing a mirrored field (title, description, location, color, all-day, start/end, recurrence) of an event synced to Google pushes the change there, and switching `target_google_calendar_id` moves it to the other Google calendar. The remote call runs after the response and is retried by the next sync run if it fails. Scoped gesture/editor requests add `edit_scope` (`this`, `following`, or `series`), `occurrence_start`, and the opaque `expected_revision`; detached occurrence requests use `expected_parent_revision` for `following` and `series`. Their local transaction and durable provider operation are committed together. For a detached parent scope, `recurrence_rule_explicit: true` marks an intentional recurrence add/change/removal; otherwise an empty full-editor recurrence field inherits the parent rule.',
         requestBody: jsonBody(null),
         responses: {
           200: {
@@ -158,6 +223,7 @@ export function calendarPaths() {
           400: { $ref: '#/components/responses/BadRequest' },
           401: { $ref: '#/components/responses/Unauthorized' },
           404: { description: 'Calendar event not found' },
+          409: { description: 'Read-only provider calendar or stale revision conflict' },
           500: { $ref: '#/components/responses/InternalServerError' },
         },
       }),

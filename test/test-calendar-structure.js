@@ -2,7 +2,7 @@
  * Calendar structure guard.
  *
  * Sichert die modulare Aufteilung von server/routes/calendar.js: der Orchestrator
- * muss dieselbe {Methode, Pfad}-Routentabelle wie vor dem Split ergeben (57
+ * muss dieselbe {Methode, Pfad}-Routentabelle wie vor dem Split ergeben (61
  * Routen), und die Cluster-Router müssen zusammen exakt diese Routen ergeben
  * (keine verlorene/doppelte Route). Zusätzlich wird die extern konsumierte
  * Re-Export-Fläche (__test.googleTarget, genutzt von test:google-multi) gepinnt.
@@ -38,6 +38,7 @@ const { default: crudRouter } = await import('../server/routes/calendar/crud.js'
 const { default: caldavRouter } = await import('../server/routes/calendar/caldav.js');
 const { default: syncTargetsRouter } = await import('../server/routes/calendar/sync-targets.js');
 const { default: outlookRouter } = await import('../server/routes/calendar/outlook.js');
+const { default: editRouter } = await import('../server/routes/calendar/edit.js');
 
 /** Sammelt geordnet alle {METHOD path}-Paare eines Express-Routers (inkl. gemounteter Sub-Router). */
 function collectRoutes(router) {
@@ -97,6 +98,14 @@ const EXPECTED = [
   'GET /holidays',
   // sync-targets (Auswahlliste des Event-Modals, #618)
   'GET /sync-targets',
+  // Scoped context/retry routes. PUT /:id is intentionally present in both
+  // edit and CRUD: edit delegates requests without edit_scope via next().
+  'GET /:id/edit-context',
+  'POST /:id/retry-sync',
+  'POST /:id/reload-sync',
+  'POST /:id/resolve-recovery',
+  'POST /:id/discard-recovery',
+  'PUT /:id',
   // crud (/:id-Familie)
   'GET /:id',
   'POST /',
@@ -129,21 +138,22 @@ const EXPECTED = [
   'GET /outlook/status',
 ];
 
-test('Orchestrator ergibt exakt die erwartete Routentabelle (57 Routen)', () => {
+test('Orchestrator ergibt exakt die erwartete Routentabelle (63 Routen)', () => {
   const actual = collectRoutes(calendarRouter).sort();
   assert.deepEqual(actual, [...EXPECTED].sort());
-  assert.equal(actual.length, 57);
+  assert.equal(actual.length, 63);
 });
 
 test('die Cluster-Router zusammen ergeben genau die Orchestrator-Routen (keine verlorene/doppelte Route)', () => {
   const perModule = [
     readRouter, googleRouter, appleRouter, subscriptionsRouter, feedRouter, crudRouter, caldavRouter,
-    syncTargetsRouter, outlookRouter,
+    syncTargetsRouter, outlookRouter, editRouter,
   ].flatMap(collectRoutes);
   // keine Route kommt in mehr als einem Cluster-Router vor
   const seen = new Set();
+  const intentionalDelegates = new Set(['PUT /:id']);
   for (const r of perModule) {
-    assert.ok(!seen.has(r), `Route ${r} kommt in mehreren Cluster-Routern vor`);
+    assert.ok(!seen.has(r) || intentionalDelegates.has(r), `Route ${r} kommt in mehreren Cluster-Routern vor`);
     seen.add(r);
   }
   assert.deepEqual(perModule.sort(), collectRoutes(calendarRouter).sort());

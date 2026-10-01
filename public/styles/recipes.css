@@ -451,6 +451,21 @@
   align-self: flex-start;
 }
 
+.recipe-import-other {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.recipe-import-other[hidden] {
+  display: none;
+}
+
+.recipe-import-code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+  font-size: var(--type-caption);
+  resize: vertical;
+}
+
 .recipe-meal-types {
   display: flex;
   flex-wrap: wrap;

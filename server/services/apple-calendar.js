@@ -24,7 +24,13 @@ import { readSyncOutcome, withSyncOutcome } from './sync-outcome.js';
 import { unfoldLines, parseICS, formatICSDate, tzLocalToUTC, applyDuration, normalizeRecurrenceOverrides } from './ics-parser.js';
 import { decodeHtmlEntities } from '../utils/html-entities.js';
 import * as outbound from './calendar-outbound.js';
-import { processPendingDeletions, processPendingUpdates, flushAccount } from './caldav-outbound.js';
+import {
+  processPendingDeletions,
+  processPendingUpdates,
+  processScopedOperation,
+  flushAccount,
+} from './caldav-outbound.js';
+import * as editOperations from './calendar-edit-operations.js';
 import { rruleLine } from './recurrence.js';
 import { eventDateTimeFields } from '../utils/ics-datetime.js';
 import { vtimezoneFor } from '../utils/vtimezone.js';
@@ -34,6 +40,148 @@ import { nearestIcalColorName } from '../utils/ical-color.js';
 import { outboundEvent } from './outbound-dtstart.js';
 
 const APPLE_COLOR = '#FC3C44';
+
+function appleScopedIds(operation) {
+  const payload = editOperations.parseScopedOperationPayload(operation) || {};
+  const provider = payload.provider || payload.remote || {};
+  const ids = [
+    provider.uid, provider.masterId, provider.masterUid, provider.master_uid,
+    payload.master_external_id, payload.provider_uid,
+    operation.provider_uid, operation.event_external_id,
+  ].filter(Boolean).map(String);
+  try {
+    const event = operation?.event_id
+      ? db.get().prepare(`
+          SELECT external_calendar_id, target_caldav_calendar_url, exception_of_event_id
+          FROM calendar_events WHERE id = ?
+        `).get(operation.event_id)
+      : null;
+    ids.push(...[event?.external_calendar_id].filter(Boolean).map(String));
+    if (event?.exception_of_event_id) {
+      const parent = db.get().prepare(`
+        SELECT external_calendar_id, target_caldav_calendar_url
+        FROM calendar_events WHERE id = ?
+      `).get(event.exception_of_event_id);
+      ids.push(...[parent?.external_calendar_id].filter(Boolean).map(String));
+      return {
+        ids: new Set(ids),
+        calendarUrl: provider.calendarUrl || provider.calendar_url
+          || payload.target_calendar_url || payload.target_calendar_id
+          || event?.target_caldav_calendar_url || parent?.target_caldav_calendar_url || null,
+      };
+    }
+    return {
+      ids: new Set(ids),
+      calendarUrl: provider.calendarUrl || provider.calendar_url
+        || payload.target_calendar_url || payload.target_calendar_id
+        || event?.target_caldav_calendar_url || null,
+    };
+  } catch {
+    return {
+      ids: new Set(ids),
+      calendarUrl: provider.calendarUrl || provider.calendar_url
+        || payload.target_calendar_url || payload.target_calendar_id || null,
+    };
+  }
+}
+
+function appleUidMatches(left, right) {
+  if (!left || !right) return false;
+  const a = String(left);
+  const b = String(right);
+  return a === b || a.split('::')[0] === b || a === b.split('::')[0];
+}
+
+function activeAppleOperationTouches(operation, uid, calendarUrl) {
+  const identity = appleScopedIds(operation);
+  if (identity.calendarUrl && calendarUrl && identity.calendarUrl !== calendarUrl) return false;
+  return [...identity.ids].some((id) => appleUidMatches(id, uid));
+}
+
+function persistAppleEventRevision(eventId, etag) {
+  if (!eventId || !etag) return;
+  try {
+    const database = db.get();
+    database.prepare('UPDATE calendar_events SET provider_revision = ? WHERE id = ?')
+      .run(String(etag), eventId);
+    editOperations.clearCalendarEditSyncAfterReadback?.(eventId, 'apple', database);
+  } catch (err) {
+    if (!/no such (table|column)/i.test(String(err?.message || ''))) {
+      log.warn(`Could not persist Apple provider revision for ${eventId}:`, err.message);
+    }
+  }
+}
+
+function reconcileAppleScopedIdentity(operation, remote, calendarUrl) {
+  const providerUid = remote?.providerUid || remote?.provider_uid || null;
+  if (!operation?.event_id || !providerUid) return;
+  let calendarRefId = null;
+  try {
+    calendarRefId = db.get().prepare(
+      `SELECT id FROM external_calendars WHERE source = 'apple' AND external_id = ?`
+    ).get(calendarUrl)?.id ?? null;
+    db.get().prepare(`
+      UPDATE calendar_events
+      SET external_calendar_id = COALESCE(?, external_calendar_id),
+          external_source = 'apple',
+          calendar_ref_id = COALESCE(?, calendar_ref_id),
+          external_object_url = COALESCE(?, external_object_url),
+          target_caldav_calendar_url = COALESCE(?, target_caldav_calendar_url)
+      WHERE id = ?
+    `).run(
+      providerUid, calendarRefId, remote.providerObjectUrl || null,
+      calendarUrl || null, operation.event_id,
+    );
+  } catch (err) {
+    if (!/no such (table|column)/i.test(String(err?.message || ''))) throw err;
+  }
+}
+
+function scopedClaim(claim) {
+  if (!claim || typeof claim !== 'object') return null;
+  const token = claim.claim_token ?? claim.claimToken;
+  const generation = claim.claim_generation ?? claim.claimGeneration;
+  if (typeof token !== 'string' || !token || !Number.isSafeInteger(Number(generation))) return null;
+  return { claimToken: token, claimGeneration: Number(generation) };
+}
+
+async function processScopedAppleOperations(client, objectIndex, calendarsByUrl) {
+  const result = { completed: 0, retry: 0, error: 0, conflict: 0 };
+  for (const operation of editOperations.pendingCalendarEditOperations('apple', db.get())) {
+    const claimed = editOperations.claimCalendarEditOperation(operation.id, db.get());
+    if (!claimed) continue;
+    const claim = scopedClaim(claimed);
+    if (!claim) continue;
+    try {
+      const payload = editOperations.parseScopedOperationPayload(claimed) || {};
+      const provider = payload.provider || {};
+      const calendarUrl = provider.calendarUrl || provider.calendar_url
+        || payload.target_calendar_url || payload.target_calendar_id
+        || claimed.target_calendar_url || claimed.target_calendar_id || null;
+      const remote = await processScopedOperation(client, claimed, objectIndex, calendarsByUrl, claim);
+      const completed = editOperations.completeCalendarEditOperation(
+        claimed.id, remote, db.get(), claim,
+      );
+      if (!completed) continue;
+      reconcileAppleScopedIdentity(claimed, remote, remote?.providerCalendarUrl || calendarUrl);
+      result.completed++;
+    } catch (err) {
+      if (err?.claimLost) continue;
+      const status = Number(err?.code ?? err?.status ?? err?.response?.status) || null;
+      const conflict = err?.conflict === true || status === 409 || status === 412;
+      const retryable = !conflict && status !== 400 && status !== 403;
+      const failed = editOperations.failCalendarEditOperation(
+        claimed.id, err, { retryable, conflict }, db.get(), claim,
+      );
+      if (!failed) continue;
+      if (conflict) result.conflict++;
+      else if (retryable) result.retry++;
+      else result.error++;
+      log.warn(`Scoped Apple operation ${claimed.id} failed: ${err.message}`);
+    }
+  }
+  return result;
+}
 
 // --------------------------------------------------------
 // Externe Kalender-Metadaten upserten
@@ -264,7 +412,15 @@ async function flushOutbound({ makeClient } = {}) {
   const idle = { deleted: 0, updated: 0 };
   const deletions = outbound.pendingDeletions('apple').filter((r) => r.object_url);
   const updates   = outbound.pendingUpdates('apple').filter((e) => e.external_object_url);
-  if (!deletions.length && !updates.length) return idle;
+  const hasScoped = editOperations.pendingCalendarEditOperations('apple', db.get()).length > 0;
+  if (!deletions.length && !updates.length) {
+    // Scoped rows need the fetched source object and calendar metadata too;
+    // wake the normal sync path even when there is no ordinary dirty marker.
+    if (hasScoped) {
+      try { await sync(); } catch (err) { log.warn(`Scoped Apple sync deferred: ${err.message}`); }
+    }
+    return idle;
+  }
 
   const creds = getCredentials();
   if (!creds) return idle;
@@ -279,9 +435,13 @@ async function flushOutbound({ makeClient } = {}) {
   try {
     const client = await (makeClient || createClient)(creds);
     // Apple kennt keinen wählbaren Zielkalender, also nie einen Umzug.
-    return await flushAccount(client, 'apple', {
+    const result = await flushAccount(client, 'apple', {
       deletions, updates: withCalendar, needsCalendars: false,
     });
+    if (hasScoped && editOperations.pendingCalendarEditOperations('apple', db.get()).length) {
+      try { await sync(); } catch (err) { log.warn(`Scoped Apple sync deferred: ${err.message}`); }
+    }
+    return result;
   } catch (err) {
     log.warn(`Immediate outbound attempt failed: ${err.message}`);
     return idle;
@@ -332,6 +492,7 @@ async function runSync() {
   const objectIndex     = new Map();
   const calendarsByUrl  = new Map();
   const ownCalendarUrls = new Set();
+  const activeScopedOperations = editOperations.activeCalendarEditOperations('apple', db.get());
   // Offene Löschungen einmal je Lauf, nicht je eingehendem Termin.
   const pendingDeletionUids = outbound.pendingDeletionUids('apple');
 
@@ -397,9 +558,16 @@ async function runSync() {
             `SELECT id, outbound_dirty FROM calendar_events WHERE external_calendar_id = ? AND external_source = 'apple'`
           ).get(ev.uid);
 
+          // Capture the server baseline before protecting an in-flight scoped
+          // edit. The queued conditional token remains unchanged; this newer
+          // revision is what exposes a concurrent remote change.
+          if (existing?.id) persistAppleEventRevision(existing.id, obj.etag);
+
           // Eine lokale Bearbeitung, die noch auf ihren Push wartet, darf der
           // Inbound nicht mit dem alten Serverstand überschreiben (#593).
-          if (existing?.outbound_dirty) continue;
+           if (existing?.outbound_dirty || activeScopedOperations.some((operation) => (
+             activeAppleOperationTouches(operation, ev.uid, cal.url)
+           ))) continue;
 
           let eventId;
           if (existing) {
@@ -481,11 +649,23 @@ async function runSync() {
   // Inbound überspringt dafür alles, was hier noch aussteht.
   // --------------------------------------------------------
   try {
-    const removed = await processPendingDeletions(client, 'apple', objectIndex, ownCalendarUrls);
-    if (removed) log.info(`${removed} pending deletion(s) applied in iCloud.`);
-    const pushed = await processPendingUpdates(client, 'apple', objectIndex, calendarsByUrl);
-    if (pushed) log.info(`${pushed} local change(s) pushed to iCloud.`);
-  } catch (err) {
+      const removed = await processPendingDeletions(client, 'apple', objectIndex, ownCalendarUrls);
+      if (removed) log.info(`${removed} pending deletion(s) applied in iCloud.`);
+      const pushed = await processPendingUpdates(client, 'apple', objectIndex, calendarsByUrl);
+      if (pushed) log.info(`${pushed} local change(s) pushed to iCloud.`);
+      // Apple uses the established CalDAV write path. Its calendar discovery
+      // predates ACL metadata, so scoped rows inherit the legacy writable
+      // behavior while still receiving the same conditional object update,
+      // exception transfer, retry, and identity reconciliation semantics.
+      const writableAppleCalendars = new Map([...calendarsByUrl].map(([url, calendar]) => [
+        url,
+        { ...calendar, writable: calendar.writable !== false, readOnly: calendar.readOnly === true },
+      ]));
+      const scoped = await processScopedAppleOperations(client, objectIndex, writableAppleCalendars);
+      if (scoped.completed || scoped.retry || scoped.error || scoped.conflict) {
+        log.info(`Scoped Apple edits: ${scoped.completed} completed, ${scoped.retry} retry, ${scoped.error} error, ${scoped.conflict} conflict.`);
+      }
+    } catch (err) {
     log.error('Outbound changes failed:', err.message);
   }
 
@@ -529,6 +709,7 @@ async function runSync() {
         UPDATE calendar_events
         SET external_calendar_id = ?, external_source = 'apple',
             external_object_url = ?, calendar_ref_id = ?,
+            outbound_dirty = 0, outbound_attempts = 0, outbound_move_to = NULL,
             color_modified = CASE WHEN color IS NOT NULL THEN 1 ELSE color_modified END
         WHERE id = ?
       `).run(uid, objectUrl, calRefId, event.id);
@@ -550,4 +731,4 @@ export { sync, flushOutbound, getStatus, saveCredentials, clearCredentials,
 // Nur fuer Tests: der ICS-Builder ist der einzige Weg, auf dem ein rein lokaler
 // Termin zum Anbieter kommt, und der Sync-Pfad drumherum ist zu gross, um ihn
 // dafuer nachzustellen.
-export const __test = { buildICS };
+export const __test = { buildICS, processScopedAppleOperations };

@@ -186,6 +186,122 @@ export function zonedFields(value) {
   };
 }
 
+function fieldsToUtcMs(fields) {
+  return Date.UTC(
+    fields.year,
+    fields.month - 1,
+    fields.day,
+    fields.hour || 0,
+    fields.minute || 0,
+    fields.second || 0,
+  );
+}
+
+function formatterFieldsAt(epoch, zone) {
+  const parts = formatterFor(zone).formatToParts(new Date(epoch));
+  const get = (type) => {
+    const part = parts.find((item) => item.type === type);
+    return part ? Number(part.value) : 0;
+  };
+  const hour = get('hour');
+  return {
+    year: get('year'),
+    month: get('month'),
+    day: get('day'),
+    hour: hour === 24 ? 0 : hour,
+    minute: get('minute'),
+    second: get('second'),
+  };
+}
+
+function zoneOffsetMinutesAt(epoch, zone) {
+  const fields = formatterFieldsAt(epoch, zone);
+  return (fieldsToUtcMs(fields) - epoch) / 60000;
+}
+
+function sameWallFields(left, right) {
+  return left.year === right.year
+    && left.month === right.month
+    && left.day === right.day
+    && left.hour === right.hour
+    && left.minute === right.minute;
+}
+
+/**
+ * Resolves display-zone wall-clock fields to an instant. This is the inverse
+ * of `zonedFields()` for gesture calculations: adding elapsed time to an
+ * external event must cross a DST transition in the display zone instead of
+ * adding minutes to the civil clock. Ambiguous fallback times choose the
+ * first matching offset; nonexistent spring-forward times use the nearby
+ * transition offset, matching the platform's normal wall-clock normalization.
+ *
+ * @param {string} dateKey YYYY-MM-DD
+ * @param {string} timeKey HH:MM
+ * @returns {number} epoch milliseconds, or NaN when the fields are invalid
+ */
+export function zonedDateTimeToInstant(dateKey, timeKey = '00:00') {
+  const dateMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateKey ?? ''));
+  const timeMatch = /^(\d{2}):(\d{2})$/.exec(String(timeKey ?? ''));
+  if (!dateMatch || !timeMatch) return NaN;
+  const target = {
+    year: Number(dateMatch[1]),
+    month: Number(dateMatch[2]),
+    day: Number(dateMatch[3]),
+    hour: Number(timeMatch[1]),
+    minute: Number(timeMatch[2]),
+    second: 0,
+  };
+  if (target.month < 1 || target.month > 12 || target.day < 1 || target.day > 31
+      || target.hour > 23 || target.minute > 59) return NaN;
+
+  const fakeUtc = fieldsToUtcMs(target);
+  const zone = displayTimeZone();
+  if (!zone) {
+    return new Date(
+      target.year,
+      target.month - 1,
+      target.day,
+      target.hour,
+      target.minute,
+      0,
+      0,
+    ).getTime();
+  }
+
+  // A zone can have different offsets on either side of the target (and a
+  // fallback hour has two valid offsets), so probe a small window rather than
+  // trusting only the offset at the fake UTC instant.
+  const offsets = new Set();
+  for (const delta of [-2, -1, 0, 1, 2]) {
+    offsets.add(zoneOffsetMinutesAt(fakeUtc + delta * 24 * 60 * 60 * 1000, zone));
+  }
+  for (const offset of offsets) {
+    const candidate = fakeUtc - offset * 60000;
+    if (sameWallFields(formatterFieldsAt(candidate, zone), target)) return candidate;
+  }
+
+  // Spring-forward wall times do not have an exact instant. Using the offset
+  // at the target keeps the result on the same side of the transition and is
+  // the least surprising normalization for a dragged 15-minute slot.
+  return fakeUtc - zoneOffsetMinutesAt(fakeUtc, zone) * 60000;
+}
+
+/**
+ * Adds elapsed minutes to display-zone wall-clock fields and returns the new
+ * wall-clock fields. The elapsed interval crosses DST with the zone's actual
+ * offset changes.
+ */
+export function addZonedElapsedMinutes(dateKey, timeKey, minutes) {
+  const epoch = zonedDateTimeToInstant(dateKey, timeKey);
+  if (!Number.isFinite(epoch) || !Number.isFinite(Number(minutes))) return null;
+  const fields = zonedFields(new Date(epoch + Number(minutes) * 60000));
+  if (!fields) return null;
+  return {
+    date: `${fields.year}-${pad2(fields.month)}-${pad2(fields.day)}`,
+    time: `${pad2(fields.hour)}:${pad2(fields.minute)}`,
+  };
+}
+
 const pad2 = (n) => String(n).padStart(2, '0');
 
 /**

@@ -45,13 +45,15 @@ export function pruneDeletedEvents(database, {
   accountUids = calendarUids,
   source = 'caldav',
   calendarName = null,
+  protectedEventIds = new Set(),
 } = {}) {
   const localEvents = database.prepare(`
     SELECT id, external_calendar_id FROM calendar_events
     WHERE calendar_ref_id = ? AND external_source = ?
   `).all(calRefId, source);
 
-  const stale = localEvents.filter(ev => !accountUids.has(ev.external_calendar_id));
+  const stale = localEvents.filter(ev => !accountUids.has(ev.external_calendar_id)
+    && !protectedEventIds.has(ev.id));
   if (stale.length === 0) return 0;
 
   if (calendarUids.size === 0) {

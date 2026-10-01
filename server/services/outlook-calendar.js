@@ -836,6 +836,11 @@ async function sync({ fetchImpl = fetch } = {}) {
             }
             updated++;
           }
+          conn.prepare(`
+            UPDATE calendar_events
+            SET outbound_dirty = 0, outbound_attempts = 0, outbound_move_to = NULL
+            WHERE id = ? AND external_source = 'local'
+          `).run(event.id);
           // Hash unverändert + kein Drift → No-Op (keine weitere Anfrage).
         } catch (err) {
           log.error(`Push failed for event ${event.id} (account ${account.id}):`, err.message);

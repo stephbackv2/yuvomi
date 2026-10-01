@@ -50,8 +50,10 @@ function connect() {
 
 function reset() {
   db.prepare('DELETE FROM calendar_pending_deletions').run();
+  db.prepare('DELETE FROM calendar_edit_operations').run();
   db.prepare('DELETE FROM calendar_events').run();
   db.prepare('DELETE FROM external_calendars').run();
+  db.prepare('DELETE FROM google_calendar_selection').run();
   db.prepare("DELETE FROM sync_config WHERE key LIKE 'google_%'").run();
   connect();
 }
@@ -1050,6 +1052,8 @@ test('DELETE /:id auf unbekannte ID bleibt 404 ohne Tombstone', async () => {
 test('PUT /:id markiert ein gespiegeltes Event für den Push', async () => {
   reset();
   const calRefId = __test.upsertExternalCalendar('google', 'fam@g', 'Familie', '#34A853');
+  db.prepare(`INSERT INTO google_calendar_selection (calendar_id, name, enabled, access_role)
+              VALUES ('fam@g', 'Familie', 1, 'owner')`).run();
   const event = insertGoogleEvent({ calRefId, googleId: 'gev-put' });
 
   const res = await callRoute('PUT', `/${event.id}`, { title: 'Verschoben' });
@@ -1063,6 +1067,8 @@ test('PUT /:id markiert ein gespiegeltes Event für den Push', async () => {
 test('PUT /:id markiert nicht, wenn sich kein gespiegeltes Feld ändert', async () => {
   reset();
   const calRefId = __test.upsertExternalCalendar('google', 'fam@g', 'Familie', '#34A853');
+  db.prepare(`INSERT INTO google_calendar_selection (calendar_id, name, enabled, access_role)
+              VALUES ('fam@g', 'Familie', 1, 'owner')`).run();
   const event = insertGoogleEvent({ calRefId, googleId: 'gev-put-noop' });
 
   const res = await callRoute('PUT', `/${event.id}`, { visibility: 'private' });
@@ -1076,6 +1082,8 @@ test('PUT /:id markiert nicht, wenn sich kein gespiegeltes Feld ändert', async 
 test('PUT /:id merkt einen gewechselten Zielkalender als Umzug vor', async () => {
   reset();
   const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primär', '#4285F4');
+  db.prepare(`INSERT INTO google_calendar_selection (calendar_id, name, enabled, access_role)
+              VALUES ('primary', 'Primär', 1, 'owner')`).run();
   const event = insertGoogleEvent({ calRefId, googleId: 'gev-put-move', target: 'primary' });
 
   const res = await callRoute('PUT', `/${event.id}`, { target_google_calendar_id: 'fam@g' });
@@ -1096,4 +1104,412 @@ test('PUT /:id markiert einen rein lokalen Termin nicht', async () => {
   const res = await callRoute('PUT', `/${r.lastInsertRowid}`, { title: 'Anders' });
   assert.equal(res.status, 200);
   assert.equal(reload(r.lastInsertRowid).outbound_dirty, 0);
+});
+
+// ── Durable scoped provider operations ──────────────────────────────────────────
+
+function queueGoogleScopedOperation(eventId, {
+  scope = 'this', occurrenceStart = '2035-03-17T09:00', masterId = 'series-1',
+  after = {}, provider = {}, split = null, status = 'pending',
+} = {}) {
+  const snapshot = {
+    title: 'Scoped edit', description: null, start_datetime: '2035-03-17T10:00',
+    end_datetime: '2035-03-17T11:00', all_day: 0, location: null, color: null,
+    recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin', ...after,
+  };
+  return Number(db.prepare(`
+    INSERT INTO calendar_edit_operations
+      (event_id, source, scope, occurrence_start, payload_json, status)
+    VALUES (?, 'google', ?, ?, ?, ?)
+  `).run(eventId, scope, occurrenceStart, JSON.stringify({
+    event_id: eventId, source: 'google', scope, occurrence_start: occurrenceStart,
+    before: { ...snapshot, title: 'Before' }, after: snapshot,
+    master_external_id: masterId, target_calendar_id: 'primary', provider,
+    ...(split ? { split } : {}),
+  }), status).lastInsertRowid);
+}
+
+test('scoped Google this edit resolves the original occurrence and sends its ETag', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-1', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    provider: { masterId: 'series-1', etag: '"master-v1"' },
+  });
+  const patches = [];
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      instances: async () => ({ data: { items: [{
+        id: 'series-1_20350317T090000Z',
+        etag: '"occ-v1"',
+        originalStartTime: { dateTime: '2035-03-17T09:00:00+01:00' },
+      }] } }),
+      patch: async (params) => {
+        patches.push(params);
+        return { data: { id: params.eventId, etag: '"occ-v2"' } };
+      },
+    },
+  };
+
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.completed, 1);
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].eventId, 'series-1_20350317T090000Z');
+  assert.equal(patches[0].headers['If-Match'], '"occ-v1"');
+  assert.equal(patches[0].requestBody.summary, 'Scoped edit');
+  const operation = db.prepare('SELECT status, payload_json FROM calendar_edit_operations').get();
+  assert.equal(operation.status, 'completed');
+  assert.equal(JSON.parse(operation.payload_json).provider_result.providerUid, 'series-1_20350317T090000Z');
+});
+
+test('scoped Google this edit prefers the imported occurrence baseline over a fresh lookup', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-baseline', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    masterId: 'series-baseline',
+    provider: { masterId: 'series-baseline', etag: '"master-v1"' },
+  });
+  db.prepare(`
+    INSERT INTO sync_config (key, value) VALUES (?, ?)
+  `).run(
+    'calendar_provider_event:google:primary:series-baseline_20350317T090000Z',
+    JSON.stringify({ etag: '"occ-imported"' }),
+  );
+  const patches = [];
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      instances: async () => ({ data: { items: [{
+        id: 'series-baseline_20350317T090000Z',
+        etag: '"occ-fresh"',
+        originalStartTime: { dateTime: '2035-03-17T09:00:00+01:00' },
+      }] } }),
+      patch: async (params) => {
+        patches.push(params);
+        return { data: { id: params.eventId, etag: '"occ-next"' } };
+      },
+    },
+  };
+
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.completed, 1);
+  assert.equal(patches[0].headers['If-Match'], '"occ-imported"');
+});
+
+test('scoped Google conflict becomes a durable error without a success claim', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-2', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    masterId: 'series-2',
+    provider: { occurrenceId: 'series-2_20350317T090000Z', etag: '"old"', masterId: 'series-2' },
+  });
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      patch: async () => { throw apiError(412); },
+    },
+  };
+
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.conflict, 1);
+  const operation = db.prepare('SELECT status, last_error FROM calendar_edit_operations').get();
+  assert.equal(operation.status, 'error');
+  assert.match(operation.last_error, /HTTP 412/);
+});
+
+test('scoped Google write keeps a reader calendar permanently read-only', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-readonly', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, { masterId: 'series-readonly' });
+  let patchCount = 0;
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'reader', timeZone: 'Europe/Berlin' } }) },
+    events: { patch: async () => { patchCount++; } },
+  };
+
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.error, 1);
+  assert.equal(patchCount, 0);
+  assert.equal(db.prepare('SELECT status FROM calendar_edit_operations').get().status, 'error');
+});
+
+test('scoped Google following edit truncates the old series and creates the new master', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-following', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    scope: 'following', occurrenceStart: '2035-03-24T09:00', masterId: 'series-following',
+    split: {
+      master_after: {
+        title: 'Before', start_datetime: '2035-03-10T09:00', end_datetime: '2035-03-10T10:00',
+        all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY;UNTIL=20350323', tzid: 'Europe/Berlin',
+      },
+      new_master: {
+        title: 'Following', start_datetime: '2035-03-24T09:00', end_datetime: '2035-03-24T10:00',
+        all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin',
+      },
+    },
+  });
+  const patches = [];
+  const inserts = [];
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      patch: async (params) => {
+        patches.push(params);
+        return { data: { id: params.eventId, etag: '"master-v2"' } };
+      },
+      list: async () => ({ data: { items: [] } }),
+      insert: async (params) => {
+        inserts.push(params);
+        return { data: { id: 'series-following-new', etag: '"new-v1"' } };
+      },
+    },
+  };
+
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.completed, 1);
+  assert.equal(patches.length, 1);
+  assert.equal(inserts.length, 1);
+  assert.equal(patches[0].eventId, 'series-following');
+  assert.match(patches[0].requestBody.recurrence[0], /UNTIL=20350323T235959Z/);
+  assert.equal(inserts[0].requestBody.summary, 'Following');
+  assert.equal(inserts[0].requestBody.recurrence[0], 'RRULE:FREQ=WEEKLY');
+  assert.equal(db.prepare('SELECT status FROM calendar_edit_operations').get().status, 'completed');
+});
+
+test('scoped Google following retry reuses the marked new master instead of duplicating it', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-retry', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    scope: 'following', occurrenceStart: '2035-03-24T09:00', masterId: 'series-retry',
+    split: {
+      master_after: {
+        title: 'Before', start_datetime: '2035-03-10T09:00', end_datetime: '2035-03-10T10:00',
+        all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY;UNTIL=20350323', tzid: 'Europe/Berlin',
+      },
+      new_master: {
+        title: 'Following', start_datetime: '2035-03-24T09:00', end_datetime: '2035-03-24T10:00',
+        all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin',
+      },
+    },
+  });
+  let patchCount = 0;
+  let insertCount = 0;
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      patch: async () => { patchCount++; return { data: { id: 'series-retry', etag: `"m${patchCount}"` } }; },
+      list: async () => insertCount > 0
+        ? { data: { items: [{ id: 'series-retry-new', etag: '"new-v1"' }] } }
+        : { data: { items: [] } },
+      insert: async () => {
+        insertCount++;
+        throw apiError(503);
+      },
+    },
+  };
+
+  const first = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(first.retry, 1);
+  assert.equal(insertCount, 1);
+  assert.equal(db.prepare('SELECT status FROM calendar_edit_operations').get().status, 'retry');
+
+  const second = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(second.completed, 1);
+  assert.equal(insertCount, 1, 'the marked new series is reused on retry');
+  assert.equal(db.prepare('SELECT status FROM calendar_edit_operations').get().status, 'completed');
+});
+
+test('scoped Google following keeps exception wall time in the calendar timezone', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-dst', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    scope: 'following', occurrenceStart: '2035-06-30T09:00', masterId: 'series-dst',
+    split: {
+      master_after: {
+        title: 'Before', start_datetime: '2035-06-23T09:00', end_datetime: '2035-06-23T10:00',
+        all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY;UNTIL=20350629', tzid: 'Europe/Berlin',
+      },
+      new_master: {
+        title: 'Following', start_datetime: '2035-06-30T09:00', end_datetime: '2035-06-30T10:00',
+        all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin',
+      },
+      exception_operations: [{
+        local_event_id: 77,
+        original_start: '2035-07-07T09:00',
+        event: {
+          title: 'Sommer-Ausnahme', start_datetime: '2035-07-07T12:00',
+          end_datetime: '2035-07-07T13:00', all_day: 0, tzid: 'Europe/Berlin',
+        },
+        provider: { previousEventId: 'series-dst_20350707T090000Z', previousEtag: '"old-occ"' },
+      }],
+    },
+  });
+  const exceptionPatches = [];
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      list: async () => ({ data: { items: [] } }),
+      patch: async (params) => {
+        if (params.eventId !== 'series-dst') exceptionPatches.push(params);
+        return { data: { id: params.eventId, etag: '"next"' } };
+      },
+      insert: async () => ({ data: { id: 'series-dst-following', etag: '"new"' } }),
+      instances: async () => ({ data: { items: [{
+        id: 'series-dst-following_20350707T090000Z', etag: '"occ"',
+        originalStartTime: { dateTime: '2035-07-07T09:00:00+02:00' },
+      }] } }),
+    },
+  };
+
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.completed, 1);
+  assert.equal(exceptionPatches.length, 1);
+  assert.equal(exceptionPatches[0].requestBody.start.dateTime, '2035-07-07T12:00:00');
+  assert.equal(exceptionPatches[0].requestBody.start.timeZone, 'Europe/Berlin');
+  assert.doesNotMatch(exceptionPatches[0].requestBody.start.dateTime, /Z$/);
+});
+
+test('scoped Google following refuses an unverified continuation insert after lookup failure', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-lookup-failure', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    scope: 'following', occurrenceStart: '2035-03-24T09:00', masterId: 'series-lookup-failure',
+    split: {
+      master_after: { title: 'Before', start_datetime: '2035-03-10T09:00', end_datetime: '2035-03-10T10:00', all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY;UNTIL=20350323', tzid: 'Europe/Berlin' },
+      new_master: { title: 'Following', start_datetime: '2035-03-24T09:00', end_datetime: '2035-03-24T10:00', all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin' },
+    },
+  });
+  let inserts = 0;
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      list: async () => { throw apiError(503); },
+      patch: async () => ({ data: { id: 'series-lookup-failure', etag: '"master"' } }),
+      insert: async () => { inserts++; return { data: { id: 'must-not-insert', etag: '"bad"' } }; },
+    },
+  };
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.retry, 1);
+  assert.equal(inserts, 0);
+  assert.equal(db.prepare('SELECT status FROM calendar_edit_operations').get().status, 'retry');
+});
+
+test('scoped Google following checkpoints the new master before exception retry', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-progress', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    scope: 'following', occurrenceStart: '2035-03-24T09:00', masterId: 'series-progress',
+    split: {
+      master_after: { title: 'Before', start_datetime: '2035-03-10T09:00', end_datetime: '2035-03-10T10:00', all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY;UNTIL=20350323', tzid: 'Europe/Berlin' },
+      new_master: { title: 'Following', start_datetime: '2035-03-24T09:00', end_datetime: '2035-03-24T10:00', all_day: 0, recurrence_rule: 'RRULE:FREQ=WEEKLY', tzid: 'Europe/Berlin' },
+      exception_operations: [{
+        local_event_id: 88, original_start: '2035-03-31T09:00',
+        event: { title: 'Later', start_datetime: '2035-03-31T12:00', end_datetime: '2035-03-31T13:00', all_day: 0, tzid: 'Europe/Berlin' },
+      }],
+    },
+  });
+  let inserts = 0;
+  let instanceCalls = 0;
+  let exceptionPatches = 0;
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'owner', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      list: async () => ({ data: { items: [] } }),
+      patch: async (params) => {
+        if (params.eventId !== 'series-progress') exceptionPatches++;
+        return { data: { id: params.eventId, etag: '"patched"' } };
+      },
+      insert: async () => {
+        inserts++;
+        return { data: { id: 'series-progress-following', etag: '"new-v1"' } };
+      },
+      instances: async () => {
+        instanceCalls++;
+        if (instanceCalls === 1) throw apiError(503);
+        return { data: { items: [{
+          id: 'series-progress-following_20350331T090000Z', etag: '"occ"',
+          originalStartTime: { dateTime: '2035-03-31T09:00:00+01:00' },
+        }] } };
+      },
+    },
+  };
+
+  const first = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(first.retry, 1);
+  const pending = db.prepare('SELECT status, progress_json FROM calendar_edit_operations').get();
+  assert.equal(pending.status, 'retry');
+  const progress = JSON.parse(pending.progress_json);
+  assert.equal(progress.continuation_master.accepted, true);
+  assert.equal(progress.continuation_master.id, 'series-progress-following');
+  assert.equal(inserts, 1);
+
+  const second = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(second.completed, 1);
+  assert.equal(inserts, 1, 'retry uses the checkpointed continuation identity');
+  assert.equal(exceptionPatches, 1);
+});
+
+test('scoped Google series edit patches the master and preserves its conditional baseline', async () => {
+  reset();
+  const calRefId = __test.upsertExternalCalendar('google', 'primary', 'Primary', '#4285F4');
+  const event = insertGoogleEvent({
+    calRefId, googleId: 'series-series', recurrence_rule: 'RRULE:FREQ=WEEKLY', target: 'primary',
+  });
+  queueGoogleScopedOperation(event.id, {
+    scope: 'series', masterId: 'series-series',
+    provider: { masterId: 'series-series', etag: '"master-v1"' },
+    after: { title: 'Whole series' },
+  });
+  const patches = [];
+  const calendar = {
+    colors: { get: async () => ({ data: { event: {} } }) },
+    calendarList: { get: async () => ({ data: { accessRole: 'writer', timeZone: 'Europe/Berlin' } }) },
+    events: {
+      patch: async (params) => { patches.push(params); return { data: { id: params.eventId, etag: '"master-v2"' } }; },
+    },
+  };
+
+  const result = await __test.processScopedOperations(calendar, new Map());
+  assert.equal(result.completed, 1);
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].eventId, 'series-series');
+  assert.equal(patches[0].headers['If-Match'], '"master-v1"');
+  assert.equal(patches[0].requestBody.summary, 'Whole series');
 });

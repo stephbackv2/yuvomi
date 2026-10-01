@@ -22,6 +22,13 @@
 
 import { createLogger } from '../logger.js';
 import * as db from '../db.js';
+import {
+  pendingCalendarEditOperations,
+  claimCalendarEditOperation,
+  completeCalendarEditOperation,
+  failCalendarEditOperation,
+  parseScopedOperationPayload as parseAuthoritativeScopedOperationPayload,
+} from './calendar-edit-operations.js';
 
 const log = createLogger('CalendarOutbound');
 
@@ -275,6 +282,50 @@ export function recordObjectUrl(eventId, objectUrl) {
 }
 
 // --------------------------------------------------------
+// Vormerkung: bereichsbezogene Serienänderungen
+// --------------------------------------------------------
+
+// Scoped edits are deliberately kept in their own durable queue. The ordinary
+// `outbound_dirty` flag represents one current event row and cannot describe a
+// split series, an original occurrence identity, or two provider requests that
+// must be applied in order. The authoritative schema and state transitions live
+// in calendar-edit-operations.js; this module only keeps the historical facade
+// used by provider adapters.
+export function listScopedOperations(source = null, database = null) {
+  return pendingCalendarEditOperations(source, database);
+}
+
+/** Claims one pending/retry operation atomically for a provider run. */
+export function claimScopedOperation(id, database = null) {
+  return !!claimCalendarEditOperation(id, database);
+}
+
+/** Marks a remote operation complete only after the provider accepted it. */
+export function completeScopedOperation(id, details = {}, database = null) {
+  return completeCalendarEditOperation(id, details, database);
+}
+
+/**
+ * Records a retryable provider failure or a conflict/read-only error.
+ * Conflicts intentionally use the durable `error` status because the backend
+ * contract exposes only pending/running/retry/error/completed and must ask the
+ * user to reload before another attempt can overwrite a concurrent change.
+ */
+export function failScopedOperation(id, error, { retry = true, conflict = false } = {}, database = null) {
+  return failCalendarEditOperation(
+    id,
+    error,
+    { retryable: retry && !conflict },
+    database,
+  );
+}
+
+/** Normalises the backend JSON boundary while preserving unknown fields. */
+export function parseScopedOperationPayload(operation) {
+  return parseAuthoritativeScopedOperationPayload(operation);
+}
+
+// --------------------------------------------------------
 // Fassade für die Route
 // --------------------------------------------------------
 
@@ -345,7 +396,30 @@ export function queueEventDeletion(event, database = null) {
  * @returns {boolean} true, wenn etwas aussteht
  */
 export function markEventOutbound(before, after) {
-  if (!after || !OUTBOUND_SOURCES.includes(after.external_source)) return false;
+  if (!after) return false;
+
+  // Locally created events are uploaded by the provider's target scanner. Keep
+  // the same durable dirty bit for a scoped edit so a failed OAuth/DAV/Graph
+  // run cannot lose the user's change before the first remote identity exists.
+  // Once the scanner creates the remote object it clears this marker together
+  // with the local-to-remote handoff.
+  if (after.external_source === 'local') {
+    const hasTarget = !!(
+      after.target_google_calendar_id
+      || after.target_caldav_account_id
+      || after.target_outlook_account_id
+    );
+    if (!hasTarget) return false;
+    const targetChanged = [
+      'target_google_calendar_id', 'target_caldav_account_id',
+      'target_caldav_calendar_url', 'target_outlook_account_id',
+      'target_outlook_calendar_id',
+    ].some((field) => before?.[field] !== after[field]);
+    const dirty = mirroredFieldsChanged(before, after) || targetChanged;
+    return dirty ? markOutbound(after.id, { dirty: true }) : false;
+  }
+
+  if (!OUTBOUND_SOURCES.includes(after.external_source)) return false;
   if (!after.external_calendar_id) return false;
   if (!acceptsOutbound(after.external_source)) return false;
 
@@ -393,7 +467,8 @@ export async function flushOutbound() {
   ];
 
   for (const { source, load } of providers) {
-    if (pendingDeletionCount(source) === 0 && pendingUpdateCount(source) === 0) continue;
+    const hasScoped = pendingCalendarEditOperations(source).length > 0;
+    if (pendingDeletionCount(source) === 0 && pendingUpdateCount(source) === 0 && !hasScoped) continue;
     try {
       const mod = await load();
       const res = await mod.flushOutbound();
@@ -404,4 +479,24 @@ export async function flushOutbound() {
     }
   }
   return total;
+}
+
+/**
+ * Start an authoritative provider readback after the user resolves a conflict.
+ * The caller deliberately does not await this work: the HTTP response remains
+ * `pending` until the provider's inbound phase has supplied its current object.
+ * Keeping the provider import dynamic avoids reintroducing the service cycle
+ * that the ordinary outbound facade is designed to avoid.
+ */
+export async function refreshCalendarProvider(source) {
+  const loaders = {
+    google: () => import('./google-calendar.js'),
+    caldav: () => import('./caldav-sync.js'),
+    apple: () => import('./apple-calendar.js'),
+  };
+  const load = loaders[source];
+  if (!load) return null;
+  const provider = await load();
+  if (typeof provider.sync !== 'function') return null;
+  return provider.sync();
 }

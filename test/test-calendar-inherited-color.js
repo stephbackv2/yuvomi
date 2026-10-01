@@ -385,23 +385,34 @@ test('der Upload merkt sich, dass die hinausgeschickte Farbe unsere ist (#899)',
   // Die Regel haengt an der Stelle, an der ein LOKALER Termin zu einem
   // gespiegelten wird - das ist genau der Moment, in dem die Farbe erstmals
   // hinausgeht, und er ist in jedem Dienst als `external_source = '<anbieter>'`
-  // in einer UPDATE-SET-Liste erkennbar.
+  // zusammen mit dem Aufraeumen des Outbound-Zustands in einer UPDATE-SET-Liste
+  // erkennbar. Die scoped queue reconciliert spaeter ebenfalls die
+  // Provider-Identitaet; diese UPDATEs spiegeln keinen lokalen Upload und
+  // duerfen hier nicht als zusaetzliche Farb-Uebergaben gezaehlt werden.
   const { readFile } = await import('node:fs/promises');
   const UPDATE_RE = /UPDATE calendar_events\s+SET([\s\S]*?)WHERE/g;
 
   let gefunden = 0;
+  const anbieter = [];
   const ohneFlag = [];
   for (const datei of SYNC_DIENSTE) {
     const quelle = ohneKommentare(await readFile(new URL(`../${datei}`, import.meta.url), 'utf8'));
     for (const treffer of quelle.matchAll(UPDATE_RE)) {
       const setListe = treffer[1];
-      if (!/external_source\s*=\s*'(caldav|apple|google)'/.test(setListe)) continue;
+      const quelleAnbieter = setListe.match(/external_source\s*=\s*'(caldav|apple|google)'/);
+      // Ein echter lokaler Upload markiert den Outbound-Eintrag als erledigt.
+      // Identitaets-Reconciliation nach einer scoped Operation setzt zwar
+      // external_source, fasst den lokalen Outbound-Zustand aber nicht an.
+      if (!quelleAnbieter || !/\boutbound_dirty\s*=\s*0\b/.test(setListe)) continue;
       gefunden++;
+      anbieter.push(quelleAnbieter[1]);
       if (!/color_modified/.test(setListe)) ohneFlag.push(datei);
     }
   }
 
   assert.equal(gefunden, 3, `drei Anbieter, drei Upload-Stellen - gefunden: ${gefunden}`);
+  assert.deepEqual(anbieter.sort(), ['apple', 'caldav', 'google'],
+    'der Guard deckt je einen lokalen Upload-Handoff pro Anbieter ab');
   assert.deepEqual(ohneFlag, [],
     'der Upload muss color_modified setzen, sonst verliert der Termin seine exakte Farbe an die gemappte');
 });

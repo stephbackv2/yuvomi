@@ -21,6 +21,8 @@ import { google } from 'googleapis';
 import crypto from 'node:crypto';
 import * as db from '../db.js';
 import * as outbound from './calendar-outbound.js';
+import * as editOperations from './calendar-edit-operations.js';
+import { recoverFollowingCalendarEditAfterReadback } from './calendar-edit.js';
 import { decodeHtmlEntities } from '../utils/html-entities.js';
 import { nearestColorId } from '../utils/ical-color.js';
 // Fallback-Zone für den Outbound-Sync, wenn Google für den Zielkalender keine liefert.
@@ -85,6 +87,100 @@ function cfgDel(key) {
   db.get().prepare('DELETE FROM sync_config WHERE key = ?').run(key);
 }
 
+const googleCalendarMetaKey = (calendarId) => `calendar_provider_meta:google:${encodeURIComponent(calendarId)}`;
+const googleEventMetaKey = (calendarId, eventId) =>
+  `calendar_provider_event:google:${encodeURIComponent(calendarId)}:${encodeURIComponent(eventId)}`;
+
+function readJsonConfig(key) {
+  try {
+    const value = cfgGet(key);
+    return value ? JSON.parse(value) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonConfig(key, value) {
+  try {
+    cfgSet(key, JSON.stringify(value));
+  } catch (err) {
+    log.warn(`Could not persist provider metadata for ${key}:`, err.message);
+  }
+}
+
+function persistGoogleCalendarMetadata(calendarId, metadata) {
+  if (!calendarId || !metadata) return;
+  const accessRole = metadata.accessRole ?? null;
+  const writable = isWritableRole(accessRole);
+  persistGoogleAccessRole(calendarId, accessRole);
+  writeJsonConfig(googleCalendarMetaKey(calendarId), {
+    provider: 'google',
+    calendar_id: calendarId,
+    access_role: accessRole,
+    writable: accessRole ? writable : null,
+    read_only_reason: accessRole ? (writable ? null : 'provider_readonly') : 'provider_capability_unknown',
+    time_zone: metadata.timeZone || null,
+    observed_at: new Date().toISOString(),
+  });
+}
+
+/** Keep the capability in the authoritative selection row used by edit routes. */
+function persistGoogleAccessRole(calendarId, accessRole) {
+  if (!calendarId) return;
+  try {
+    db.get().prepare(`
+      UPDATE google_calendar_selection
+      SET access_role = ?
+      WHERE calendar_id = ?
+    `).run(accessRole ?? null, calendarId);
+  } catch (err) {
+    // Focused provider tests and pre-v194 installations can lack the column;
+    // the migration-owned schema is updated whenever it is available.
+    if (!/no such (table|column)/i.test(String(err?.message || ''))) {
+      log.warn(`Could not persist Google access role for ${calendarId}:`, err.message);
+    }
+  }
+}
+
+function persistGoogleEventRevision(eventId, etag) {
+  if (!eventId || !etag) return;
+  try {
+    const database = db.get();
+    database.prepare(`
+      UPDATE calendar_events
+      SET provider_revision = ?
+      WHERE external_calendar_id = ? AND external_source = 'google'
+    `).run(String(etag), eventId);
+    const localRows = database.prepare(`
+      SELECT id FROM calendar_events
+      WHERE external_calendar_id = ? AND external_source = 'google'
+    `).all(eventId);
+    for (const row of localRows) {
+      editOperations.clearCalendarEditSyncAfterReadback?.(row.id, 'google', database);
+    }
+  } catch (err) {
+    if (!/no such (table|column)/i.test(String(err?.message || ''))) {
+      log.warn(`Could not persist Google provider revision for ${eventId}:`, err.message);
+    }
+  }
+}
+
+function persistGoogleEventMetadata(calendarId, item) {
+  if (!calendarId || !item?.id || !item.etag) return;
+  writeJsonConfig(googleEventMetaKey(calendarId, item.id), {
+    provider: 'google',
+    calendar_id: calendarId,
+    event_id: item.id,
+    etag: item.etag,
+    object_url: item.htmlLink || null,
+    observed_at: new Date().toISOString(),
+  });
+}
+
+function googleEventMetadata(calendarId, eventId) {
+  return calendarId && eventId ? readJsonConfig(googleEventMetaKey(calendarId, eventId)) : null;
+}
+
 function isReadonly() {
   return cfgGet('google_readonly') === '1';
 }
@@ -134,6 +230,7 @@ async function loadCalendarMeta(calendar, calendarId, cache) {
       color,
       refId:    upsertExternalCalendar('google', calendarId, name, color),
     };
+    persistGoogleCalendarMetadata(calendarId, meta.data);
   } catch (err) {
     log.warn(`Calendar metadata is not accessible (${calendarId}):`, err.message);
   }
@@ -302,6 +399,713 @@ async function processPendingUpdates(calendar, colorMap = {}, metaCache = new Ma
   return done;
 }
 
+// --------------------------------------------------------
+// Bereichsbezogene Serienänderungen
+// --------------------------------------------------------
+
+function operationSnapshot(operation, side) {
+  const payload = editOperations.parseScopedOperationPayload(operation);
+  const value = side === 'before' ? payload?.before : payload?.after;
+  if (!value || typeof value !== 'object') return null;
+  // The backend may wrap the row to keep the parent and changed occurrence
+  // separately. Prefer the explicitly named object, then the first event-like
+  // object. Unknown fields are retained for provider metadata extraction.
+  return value.event || value.override || value.master || value.new_master || value;
+}
+
+function operationPayload(operation) {
+  return editOperations.parseScopedOperationPayload(operation) || {};
+}
+
+function scopedProviderProgress(operation) {
+  const payload = operationPayload(operation);
+  return operation?.progress || payload.provider_progress || payload.providerProgress
+    || operation?.provider_progress || operation?.providerProgress || {};
+}
+
+function scopedClaim(claim) {
+  if (!claim || typeof claim !== 'object') return null;
+  const token = claim.claim_token ?? claim.claimToken;
+  const generation = claim.claim_generation ?? claim.claimGeneration;
+  if (typeof token !== 'string' || !token || !Number.isSafeInteger(Number(generation))) return null;
+  return { claimToken: token, claimGeneration: Number(generation) };
+}
+
+function recordScopedProviderProgress(operation, progress, claim = null) {
+  const record = editOperations.updateCalendarEditOperationProgress;
+  if (typeof record !== 'function' || !operation?.id || !scopedClaim(claim)) return true;
+  return record(operation.id, progress, db.get(), scopedClaim(claim)) !== false;
+}
+
+function providerProgressError(operation, progress) {
+  const error = new Error(`Google scoped operation ${operation?.id ?? ''} lost its queue claim.`.trim());
+  error.code = 409;
+  error.claimLost = true;
+  error.providerProgress = progress;
+  return error;
+}
+
+function scopedLocalIdentity(operation) {
+  if (!operation?.event_id) return { event: null, parent: null };
+  try {
+    const event = db.get().prepare(`
+      SELECT id, external_calendar_id, external_source, calendar_ref_id,
+             target_google_calendar_id, provider_revision, exception_of_event_id
+      FROM calendar_events WHERE id = ?
+    `).get(operation.event_id) || null;
+    const parent = event?.exception_of_event_id
+      ? db.get().prepare(`
+          SELECT id, external_calendar_id, calendar_ref_id, target_google_calendar_id
+          FROM calendar_events WHERE id = ?
+        `).get(event.exception_of_event_id) || null
+      : null;
+    return { event, parent };
+  } catch {
+    return { event: null, parent: null };
+  }
+}
+
+function operationProvider(operation) {
+  const payload = operationPayload(operation);
+  const after = payload.after || {};
+  const local = scopedLocalIdentity(operation);
+  const isDetachedOccurrence = operation.scope === 'this'
+    && !!local.event?.exception_of_event_id
+    && !!local.parent?.external_calendar_id;
+  const before = payload.before || {};
+  const provider = {
+    ...(payload.remote || {}),
+    ...(payload.provider || {}),
+    ...(before.provider || {}),
+    ...(after.provider || {}),
+    ...(payload.master_external_id ? { masterId: payload.master_external_id } : {}),
+    ...(payload.target_calendar_id ? { calendarId: payload.target_calendar_id } : {}),
+    ...(payload.provider_uid ? { eventId: payload.provider_uid } : {}),
+    ...(operation.provider_uid ? { eventId: operation.provider_uid } : {}),
+    ...(operation.provider_event_id ? { eventId: operation.provider_event_id } : {}),
+    ...(operation.provider_etag ? { etag: operation.provider_etag } : {}),
+  };
+  const calendarId = provider.calendarId || payload.target_calendar_id || operation.target_calendar_id
+    || local.event?.target_google_calendar_id
+    || currentGoogleCalendarId(local.event) || currentGoogleCalendarId(local.parent) || null;
+  const masterId = isDetachedOccurrence
+    ? local.parent.external_calendar_id
+    : provider.masterId || provider.parentId || provider.eventId
+      || payload.master_external_id || operation.event_external_id || local.event?.external_calendar_id || null;
+  const cached = googleEventMetadata(calendarId, masterId);
+  return {
+    ...provider,
+    calendarId,
+    masterId,
+    ...(isDetachedOccurrence && local.event.external_calendar_id
+      ? {
+          occurrenceId: provider.occurrenceId || local.event.external_calendar_id,
+          // Payload revision wins over mutable inbound metadata. Older queued
+          // detached edits may only have the row's captured instance revision.
+          occurrenceEtag: provider.occurrenceEtag || local.event.provider_revision || null,
+          etag: provider.occurrenceEtag || local.event.provider_revision || null,
+        } : {}),
+    ...(provider.etag || !cached?.etag ? {} : { etag: cached.etag }),
+  };
+}
+
+function googleOperationProviderIds(operation) {
+  const payload = operationPayload(operation);
+  const provider = payload.provider || payload.remote || {};
+  const local = scopedLocalIdentity(operation);
+  return new Set([
+    provider.masterId, provider.parentId, provider.eventId, provider.uid,
+    payload.master_external_id, payload.provider_uid,
+    operation.provider_uid, operation.provider_event_id, operation.event_external_id,
+    local.event?.external_calendar_id, local.parent?.external_calendar_id,
+    ...(operation.identity?.provider_ids || []),
+  ].filter(Boolean).map(String));
+}
+
+function activeGoogleOperationTouches(item, activeOperations, calendarId = null) {
+  if (!activeOperations?.length || !item?.id) return false;
+  const remoteIds = new Set([item.id, item.recurringEventId].filter(Boolean).map(String));
+  return activeOperations.some((operation) => {
+    const dependency = operation.payload?.split_reload_dependency;
+    if (dependency && !item.recurringEventId) {
+      const parent = db.get().prepare('SELECT external_calendar_id FROM calendar_events WHERE id = ?')
+        .get(dependency.parent_event_id);
+      if (parent?.external_calendar_id === item.id) return false;
+    }
+    const target = operation.identity?.target_calendar_id;
+    if (target && calendarId && target !== calendarId) return false;
+    // Inserts carry this durable queue marker even when their response was
+    // lost before the returned event id could be checkpointed locally.
+    if (operation.scope === 'following'
+        && item.extendedProperties?.private?.yuvomiScopedOperation === String(operation.id)) return true;
+    const ids = googleOperationProviderIds(operation);
+    return [...remoteIds].some((id) => ids.has(id));
+  });
+}
+
+function googleErrorStatus(err) {
+  return Number(err?.code ?? err?.response?.status ?? err?.status) || null;
+}
+
+function isGoogleConflict(err) {
+  const status = googleErrorStatus(err);
+  return status === 409 || status === 412
+    || /precondition|etag| etag|concurrent|modified since/i.test(String(err?.message || ''));
+}
+
+function googleRequestHeaders(provider, operation) {
+  const etag = provider.etag || provider.eTag || operation?.provider_etag || null;
+  // expected_revision is an opaque local revision, not automatically an HTTP
+  // ETag. Only provider metadata that is explicitly identified as an ETag is
+  // safe to send to Google.
+  return etag ? { headers: { 'If-Match': String(etag) } } : {};
+}
+
+function sameGoogleOccurrence(item, occurrenceStart) {
+  if (!occurrenceStart) return false;
+  const wantedRaw = String(occurrenceStart);
+  const wanted = wantedRaw.slice(0, 19);
+  const original = item?.originalStartTime?.dateTime || item?.originalStartTime?.date || null;
+  if (!original) return false;
+  const originalRaw = String(original);
+  if (item?.originalStartTime?.date || /^\d{4}-\d{2}-\d{2}$/.test(wantedRaw)) {
+    return originalRaw.slice(0, 10) === wantedRaw.slice(0, 10);
+  }
+  // Google may include seconds and an offset while the API request carries a
+  // local wall time. Compare the complete wall-clock portion first; a date-only
+  // fallback would select the wrong instance when a series has two occurrences
+  // on one day.
+  return originalRaw.slice(0, 19) === wanted
+    || (originalRaw.includes('T') && wanted.length >= 16 && originalRaw.slice(0, 16) === wanted.slice(0, 16));
+}
+
+function googleOccurrenceAtOrAfter(value, cut) {
+  const left = String(value || '').slice(0, 19);
+  const right = String(cut || '').slice(0, 19);
+  return !!left && !!right && left >= right;
+}
+
+/** Resolve the provider exception by original identity, never by display date. */
+async function findGoogleOccurrence(calendar, calendarId, masterId, occurrenceStart, provider = {}) {
+  const directId = provider.occurrenceId || provider.instanceId || provider.eventId;
+  // `eventId` is the master id for a series. A separate occurrence id is
+  // preferred; using the master for a `this` operation would silently rewrite
+  // the whole series, so it is deliberately not accepted as an occurrence id.
+  if (provider.occurrenceId || provider.instanceId) {
+    if (!provider.etag && calendar?.events?.get) {
+      try {
+        const fetched = await calendar.events.get({ calendarId, eventId: directId });
+        return { id: directId, item: fetched?.data || null };
+      } catch (err) {
+        if (googleErrorStatus(err) === 404) {
+          const missing = new Error(`Google occurrence ${directId} no longer exists.`);
+          missing.code = 409;
+          throw missing;
+        }
+      }
+    }
+    return { id: directId, item: null };
+  }
+  if (!calendar?.events?.instances || !masterId || !occurrenceStart) {
+    const err = new Error('Google occurrence identity is unavailable; refusing a series fallback.');
+    err.code = 409;
+    throw err;
+  }
+
+  let pageToken;
+  do {
+    const result = await calendar.events.instances({
+      calendarId,
+      eventId: masterId,
+      showDeleted: false,
+      maxResults: 250,
+      pageToken,
+    });
+    const found = (result?.data?.items || []).find((item) => sameGoogleOccurrence(item, occurrenceStart));
+    if (found?.id) return { id: found.id, item: found };
+    pageToken = result?.data?.nextPageToken;
+  } while (pageToken);
+
+  const err = new Error(`Google occurrence ${occurrenceStart} no longer exists.`);
+  err.code = 409;
+  throw err;
+}
+
+function googleBodyForSnapshot(snapshot, colorMap, timeZone, { recurrence = true } = {}) {
+  if (!snapshot) throw new Error('Scoped provider operation has no after snapshot.');
+  const body = localEventToGoogle(snapshot, colorMap, timeZone);
+  if (!recurrence) delete body.recurrence;
+  return body;
+}
+
+// Exception PATCH requests carry a concrete instance range. Keep naive local
+// wall-clock values paired with Google's explicit calendar timezone; appending
+// `Z` would reinterpret a Berlin wall time as UTC and shift it at DST edges.
+function googleBodyForExceptionSnapshot(snapshot, colorMap, timeZone) {
+  return googleBodyForSnapshot(snapshot, colorMap, timeZone, { recurrence: false });
+}
+
+function explicitGoogleOperations(operation) {
+  const payload = operationPayload(operation);
+  const candidates = payload.operations || payload.provider?.operations || payload.remote?.operations;
+  return Array.isArray(candidates) ? candidates : [];
+}
+
+function scopedGoogleMarker(operation) {
+  return operation?.id == null ? null : String(operation.id);
+}
+
+function markedGoogleBody(body, operation, property = 'yuvomiScopedOperation') {
+  const marker = scopedGoogleMarker(operation);
+  if (!marker) return body;
+  return {
+    ...body,
+    extendedProperties: {
+      ...(body.extendedProperties || {}),
+      private: {
+        ...(body.extendedProperties?.private || {}),
+        [property]: marker,
+      },
+    },
+  };
+}
+
+async function findMarkedGoogleEvent(calendar, calendarId, operation, property = 'yuvomiScopedOperation') {
+  const marker = scopedGoogleMarker(operation);
+  if (!marker) return null;
+  if (typeof calendar?.events?.list !== 'function') {
+    const error = new Error('Google scoped idempotency lookup is unavailable; refusing an unverified insert.');
+    error.code = 503;
+    error.uncertain = true;
+    throw error;
+  }
+  try {
+    const result = await calendar.events.list({
+      calendarId,
+      singleEvents: false,
+      maxResults: 1,
+      privateExtendedProperty: [`${property}=${marker}`],
+    });
+    return result?.data?.items?.[0] || null;
+  } catch (error) {
+    // A failed marker lookup is not equivalent to an empty result. Inserting
+    // after a timeout could duplicate a continuation that Google accepted.
+    error.uncertain = true;
+    throw error;
+  }
+}
+
+async function findGoogleExceptionInstance(calendar, calendarId, inserted, item) {
+  const previousId = item.provider?.previousEventId || item.provider?.previous_event_id
+    || item.previousEventId || item.previous_event_id || null;
+  const explicitId = item.provider?.eventId || item.provider?.event_id
+    || item.eventId || item.occurrenceId || item.instanceId;
+  // `previousEventId` identifies the old master instance. It is intentionally
+  // only trace data: after a following split the write must resolve the new
+  // continuation occurrence at `continuation_start`. A provider id returned by
+  // a completed earlier transfer is safe to use when it differs from that old
+  // identity.
+  if (explicitId && (!previousId || String(explicitId) !== String(previousId))) {
+    return { id: explicitId, item: null };
+  }
+  const masterId = inserted?.data?.id || inserted?.id;
+  // A following edit can change the regular wall-clock slot. Keep the old
+  // `original_start` for traceability, but resolve the continuation instance
+  // at its rebased identity when the backend supplied one.
+  const occurrenceStart = item.continuation_start || item.continuationStart
+    || item.new_original_start || item.newOriginalStart
+    || item.target_occurrence_start || item.targetOccurrenceStart
+    || item.original_start || item.originalStart || item.occurrence_start
+    || item.occurrenceStart;
+  if (!masterId || !occurrenceStart || !calendar?.events?.instances) {
+    throw new Error('Google exception operation has no target occurrence identity.');
+  }
+  let pageToken;
+  do {
+    const result = await calendar.events.instances({
+      calendarId,
+      eventId: masterId,
+      showDeleted: false,
+      maxResults: 250,
+      pageToken,
+    });
+    const found = (result?.data?.items || []).find((candidate) => (
+      sameGoogleOccurrence(candidate, occurrenceStart)
+    ));
+    if (found?.id) return { id: found.id, item: found };
+    pageToken = result?.data?.nextPageToken;
+  } while (pageToken);
+  const err = new Error(`Google continuation occurrence ${occurrenceStart} was not created.`);
+  err.code = 409;
+  throw err;
+}
+
+function exceptionProgressKey(item, index) {
+  return String(item.local_event_id ?? item.localEventId
+    ?? item.previous_original_start ?? item.original_start ?? index);
+}
+
+async function executeGoogleExceptionOperations(
+  calendar,
+  calendarId,
+  operations,
+  inserted,
+  after,
+  colorMap,
+  zone,
+  operation,
+  requestOptions,
+  progressContext = null,
+) {
+  if (!Array.isArray(operations) || !operations.length) {
+    return {
+      result: inserted,
+      exceptionOperations: [],
+      providerProgress: progressContext?.progress || {},
+    };
+  }
+  let result = inserted;
+  const exceptionResults = [];
+  let progress = progressContext?.progress || {};
+  const acceptedExceptions = progress.exception_operations || {};
+  for (let index = 0; index < operations.length; index++) {
+    const item = operations[index];
+    const key = exceptionProgressKey(item, index);
+    const accepted = acceptedExceptions[key];
+    if (accepted?.accepted) {
+      exceptionResults.push({
+        local_event_id: item.local_event_id ?? item.localEventId ?? null,
+        localEventId: item.local_event_id ?? item.localEventId ?? null,
+        original_start: item.original_start || null,
+        previous_original_start: item.previous_original_start || null,
+        continuation_start: item.continuation_start || null,
+        providerUid: accepted.provider_uid || accepted.providerUid || null,
+        providerEtag: accepted.etag || accepted.providerEtag || null,
+        providerCalendarId: accepted.provider_calendar_id || calendarId,
+      });
+      continue;
+    }
+    const method = String(item.method || 'patch').toLowerCase();
+    const targetCalendar = item.calendarId || calendarId;
+    const target = method === 'insert'
+      ? { id: null, item: null }
+      : await findGoogleExceptionInstance(calendar, targetCalendar, inserted, item);
+    const targetId = target.id || (item.useInsertedId ? inserted?.data?.id : null);
+    if (!targetId && method !== 'insert') throw new Error('Google exception operation has no event id.');
+    const requestBody = item.requestBody || item.body
+      || googleBodyForExceptionSnapshot(item.event || item.after || item.snapshot || after, colorMap, zone);
+    const explicitEtag = item.occurrenceEtag || item.occurrence_etag || item.etag || item.provider?.etag;
+    const options = explicitEtag
+      ? googleRequestHeaders({ etag: explicitEtag }, operation)
+      : target.item?.etag ? googleRequestHeaders({ etag: target.item.etag }, operation) : {};
+    if (method === 'insert') {
+      result = await calendar.events.insert({ calendarId: targetCalendar, requestBody, ...requestOptions });
+    } else if (method === 'update') {
+      result = await calendar.events.update({ calendarId: targetCalendar, eventId: targetId, requestBody, ...options });
+    } else if (method === 'delete') {
+      result = await calendar.events.delete({ calendarId: targetCalendar, eventId: targetId, ...options });
+    } else {
+      result = await calendar.events.patch({ calendarId: targetCalendar, eventId: targetId, requestBody, ...options });
+    }
+    const localEventId = item.local_event_id ?? item.localEventId ?? null;
+    const detail = {
+      // Keep the snake-case queue key and expose the camel-case adapter seam;
+      // the backend completion helper accepts either while older queued rows
+      // retain their original payload spelling.
+      local_event_id: localEventId,
+      localEventId,
+      original_start: item.original_start || null,
+      previous_original_start: item.previous_original_start || null,
+      continuation_start: item.continuation_start || null,
+      providerUid: result?.data?.id || targetId || null,
+      providerEtag: result?.data?.etag || target.item?.etag || null,
+      providerCalendarId: targetCalendar,
+    };
+    exceptionResults.push(detail);
+    progress = {
+      ...progress,
+      phase: 'exceptions',
+      exception_operations: {
+        ...(progress.exception_operations || {}),
+        [key]: {
+          accepted: true,
+          provider_uid: detail.providerUid,
+          etag: detail.providerEtag,
+          provider_calendar_id: targetCalendar,
+        },
+      },
+    };
+    if (progressContext?.checkpoint && !progressContext.checkpoint(progress)) {
+      throw providerProgressError(operation, progress);
+    }
+  }
+  return {
+    result,
+    exceptionOperations: exceptionResults,
+    providerExceptionResults: exceptionResults,
+    providerProgress: progress,
+  };
+}
+
+async function executeGoogleOperation(calendar, calendarId, operation, colorMap, metaCache, claim = null) {
+  const payload = operationPayload(operation);
+  const provider = operationProvider(operation);
+  const after = operationSnapshot(operation, 'after');
+  const scope = operation.scope || 'series';
+  const meta = await loadCalendarMeta(calendar, calendarId, metaCache);
+  if (!isWritableRole(meta?.role ?? null)) {
+    const err = new Error(`Google calendar ${calendarId} is read-only or unavailable.`);
+    err.code = 403;
+    err.readOnly = true;
+    throw err;
+  }
+
+  const requestOptions = googleRequestHeaders(provider, operation);
+  const operations = explicitGoogleOperations(operation);
+  if (operations.length) {
+    let result = null;
+    for (const item of operations) {
+      const method = String(item.method || 'patch').toLowerCase();
+      const targetCalendar = item.calendarId || calendarId;
+      const targetId = item.eventId || provider.eventId || operation.event_external_id;
+      if (!targetId) throw new Error('Google provider operation has no event id.');
+      const requestBody = item.requestBody || item.body || googleBodyForSnapshot(item.event || after, colorMap, meta.timeZone || householdTimeZone(db.get()), { recurrence: item.recurrence !== false });
+      if (method === 'insert') {
+        result = await calendar.events.insert({ calendarId: targetCalendar, requestBody, ...requestOptions });
+      } else if (method === 'update') {
+        result = await calendar.events.update({ calendarId: targetCalendar, eventId: targetId, requestBody, ...requestOptions });
+      } else {
+        result = await calendar.events.patch({ calendarId: targetCalendar, eventId: targetId, requestBody, ...requestOptions });
+      }
+    }
+    return {
+      providerUid: result?.data?.id || provider.eventId || null,
+      providerEtag: result?.data?.etag || null,
+      providerCalendarId: calendarId,
+      providerCalendarRefId: meta.refId,
+    };
+  }
+
+  if (!after) throw new Error('Scoped Google operation has no after snapshot.');
+  const zone = meta.timeZone || householdTimeZone(db.get());
+  const body = googleBodyForSnapshot(after, colorMap, zone, { recurrence: scope !== 'this' });
+  const masterId = provider.masterId || provider.parentId || provider.eventId
+    || operation.event_external_id || operation.external_calendar_id;
+  if (!masterId) throw new Error('Scoped Google operation has no master event id.');
+
+  if (scope === 'this') {
+    const occurrence = await findGoogleOccurrence(
+      calendar, calendarId, masterId, operation.occurrence_start || operation.occurrenceStart, provider
+    );
+    const occurrenceMetadata = googleEventMetadata(calendarId, occurrence.id);
+    // The ordinary backend payload carries the recurring master's revision.
+    // Google assigns a distinct ETag to each exception instance, so using the
+    // master's ETag for an occurrence PATCH would manufacture a 412 even when
+    // the selected occurrence is unchanged.  An explicitly identified
+    // occurrence may provide its own ETag; otherwise use the ETag captured with
+    // the resolved instance and refuse an unconditioned write.
+    const occurrenceEtag = provider.occurrenceEtag || provider.occurrence_etag
+      || ((provider.occurrenceId || provider.instanceId) ? provider.etag : null)
+      || occurrenceMetadata?.etag || occurrence.item?.etag || null;
+    if (!occurrenceEtag) {
+      const err = new Error(`Google occurrence ${occurrence.id} has no captured ETag.`);
+      err.code = 409;
+      throw err;
+    }
+    const occurrenceRequestOptions = googleRequestHeaders(
+      { ...provider, etag: occurrenceEtag }, operation
+    );
+    const occurrenceResult = await calendar.events.patch({
+      calendarId, eventId: occurrence.id,
+      requestBody: body,
+      ...occurrenceRequestOptions,
+    });
+    return {
+      ...(occurrenceResult?.data || {}),
+      providerUid: occurrence.id,
+      providerEtag: occurrenceResult?.data?.etag || occurrenceEtag,
+      providerCalendarId: calendarId,
+    };
+  }
+
+  if (scope === 'following') {
+    const split = payload.split || payload.remote?.split || payload.provider?.split || {};
+    const masterAfter = split.master_after || payload.master_after || payload.parent_after || null;
+    const newMaster = split.new_master || split.following || payload.new_master || payload.following || null;
+    // A following edit is two provider operations. Applying only the new
+    // series would duplicate the old tail; applying only the truncation would
+    // lose it. The backend provides exact snapshots when it has mapped local
+    // exception identities. Refuse an implicit whole-series fallback.
+    if (!masterAfter || !newMaster) {
+      const err = new Error('Following Google edit lacks an explicit master split payload.');
+      err.code = 400;
+      throw err;
+    }
+    let progress = scopedProviderProgress(operation);
+    const checkpoint = (next) => {
+      progress = next;
+      return recordScopedProviderProgress(operation, progress, claim);
+    };
+    let masterEtag = progress.old_master?.etag || null;
+    try {
+      if (progress.old_master?.accepted !== true) {
+        const masterMarker = await findMarkedGoogleEvent(calendar, calendarId, operation, 'yuvomiScopedMaster');
+        if (!masterMarker) {
+          const patchedMaster = await calendar.events.patch({
+            calendarId, eventId: masterId,
+            requestBody: markedGoogleBody(googleBodyForSnapshot(masterAfter, colorMap, zone), operation, 'yuvomiScopedMaster'),
+            ...requestOptions,
+          });
+          masterEtag = patchedMaster?.data?.etag || masterEtag || provider.etag || null;
+        } else {
+          masterEtag = masterMarker.etag || masterEtag || provider.etag || null;
+        }
+        const masterProgress = {
+          ...progress,
+          phase: 'continuation_master',
+          old_master: { ...(progress.old_master || {}), accepted: true, id: masterId, etag: masterEtag },
+        };
+        if (!checkpoint(masterProgress)) throw providerProgressError(operation, masterProgress);
+      }
+
+      let inserted;
+      if (progress.continuation_master?.accepted === true) {
+        inserted = {
+          id: progress.continuation_master.id,
+          etag: progress.continuation_master.etag || null,
+        };
+      } else {
+        const marked = await findMarkedGoogleEvent(calendar, calendarId, operation);
+        if (marked) {
+          inserted = marked;
+        } else {
+          inserted = (await calendar.events.insert({
+            calendarId,
+            requestBody: markedGoogleBody(googleBodyForSnapshot(newMaster, colorMap, zone), operation),
+          }))?.data || null;
+        }
+        if (!inserted?.id) {
+          const uncertain = new Error('Google continuation insert returned no event id.');
+          uncertain.code = 503;
+          uncertain.uncertain = true;
+          throw uncertain;
+        }
+        const continuationProgress = {
+          ...progress,
+          phase: 'exceptions',
+          old_master: { ...(progress.old_master || {}), accepted: true, id: masterId, etag: masterEtag },
+          continuation_master: {
+            ...(progress.continuation_master || {}),
+            accepted: true, id: inserted.id, etag: inserted.etag || null,
+          },
+        };
+        if (!checkpoint(continuationProgress)) throw providerProgressError(operation, continuationProgress);
+      }
+      const exceptionOperations = split.exception_operations || split.exceptionOperations
+        || payload.exception_operations || payload.exceptionOperations || [];
+      const exceptionSummary = payload.exception_summary;
+      const laterExceptions = exceptionSummary?.known === true
+        && Array.isArray(exceptionSummary.items)
+        && exceptionSummary.items.some((item) => googleOccurrenceAtOrAfter(
+          item.original_start || item.originalStart || item.current_start,
+          operation.occurrence_start || operation.occurrenceStart,
+        ));
+      if (laterExceptions && !exceptionOperations.length) {
+        const err = new Error('Following Google edit lacks provider exception transfer operations.');
+        err.code = 400;
+        throw err;
+      }
+      const finalResult = await executeGoogleExceptionOperations(
+        calendar, calendarId, exceptionOperations, inserted, newMaster, colorMap, zone, operation, requestOptions,
+        { progress, checkpoint },
+      );
+      const finalResponse = finalResult?.result || finalResult;
+      progress = finalResult?.providerProgress || progress;
+      const completeProgress = { ...progress, phase: 'complete' };
+      if (!checkpoint(completeProgress)) throw providerProgressError(operation, completeProgress);
+      return {
+        // Exception PATCH responses identify the detached instance. The local
+        // continuation row must retain the new master identity so the next
+        // inbound sync and a second scoped edit address the same series.
+        providerUid: inserted?.id || finalResult?.data?.id || null,
+        providerEtag: inserted?.etag || finalResponse?.data?.etag || null,
+        providerCalendarId: calendarId,
+        providerCalendarRefId: meta.refId,
+        exceptionOperations: finalResult?.exceptionOperations || [],
+        providerExceptionResults: finalResult?.providerExceptionResults
+          || finalResult?.exceptionOperations || [],
+        providerProgress: completeProgress,
+      };
+    } catch (error) {
+      if (progress && typeof progress === 'object') error.providerProgress = progress;
+      throw error;
+    }
+  }
+
+  const result = await calendar.events.patch({
+    calendarId, eventId: masterId,
+    requestBody: body,
+    ...requestOptions,
+  });
+  return {
+    providerUid: result?.data?.id || masterId,
+    providerEtag: result?.data?.etag || null,
+    providerCalendarId: calendarId,
+    providerCalendarRefId: meta.refId,
+  };
+}
+
+/**
+ * Applies backend-owned durable Google scope operations. Ordinary outbound
+ * markers remain independent and continue to use processPendingUpdates().
+ */
+async function processScopedOperations(calendar, metaCache = new Map()) {
+  const result = { completed: 0, retry: 0, error: 0, conflict: 0 };
+  const rows = editOperations.pendingCalendarEditOperations('google', db.get());
+  if (!rows.length) return result;
+
+  const colorMap = await fetchEventColorMap(calendar);
+  for (const operation of rows) {
+    const claimed = editOperations.claimCalendarEditOperation(operation.id, db.get());
+    if (!claimed) continue;
+    const claim = scopedClaim(claimed);
+    if (!claim) continue;
+    try {
+      const payload = operationPayload(claimed);
+      const provider = operationProvider(claimed);
+      const local = scopedLocalIdentity(claimed);
+      const calendarId = provider.calendarId || claimed.calendar_external_id
+        || claimed.target_calendar_id || local.event?.target_google_calendar_id
+        || currentGoogleCalendarId(local.event) || currentGoogleCalendarId(local.parent) || null;
+      if (!calendarId) throw new Error('Scoped Google operation has no calendar id.');
+      const remote = await executeGoogleOperation(calendar, calendarId, claimed, colorMap, metaCache, claim);
+      const completed = editOperations.completeCalendarEditOperation(
+        claimed.id, remote, db.get(), claim
+      );
+      if (!completed) continue;
+      result.completed++;
+    } catch (err) {
+      if (err?.claimLost) continue;
+      const conflict = isGoogleConflict(err);
+      const readonly = err?.readOnly === true || googleErrorStatus(err) === 403 && /read-only|unavailable|forbidden/i.test(String(err.message));
+      const retry = !conflict && !readonly && googleErrorStatus(err) !== 400;
+      const failed = editOperations.failCalendarEditOperation(
+        claimed.id,
+        err,
+        { retryable: retry, conflict },
+        db.get(),
+        claim,
+      );
+      if (!failed) continue;
+      if (conflict) result.conflict++;
+      else if (retry) result.retry++;
+      else result.error++;
+      log.warn(`Scoped Google operation ${claimed.id} failed: ${err.message}`);
+    }
+  }
+  return result;
+}
+
 /**
  * Sofortiger Best-Effort-Durchlauf direkt nach einer lokalen Änderung oder
  * Löschung, damit Google nicht erst beim nächsten Sync-Intervall nachzieht.
@@ -314,14 +1118,17 @@ async function flushOutbound() {
 
   const hasDeletions = pendingDeletionCount() > 0;
   const hasUpdates   = pendingUpdateCount() > 0;
-  if (!hasDeletions && !hasUpdates) return idle;
+  const hasScoped = editOperations.pendingCalendarEditOperations('google', db.get()).length > 0;
+  if (!hasDeletions && !hasUpdates && !hasScoped) return idle;
 
   const calendar = google.calendar({ version: 'v3', auth: loadAuthorizedClient() });
   const deleted = hasDeletions ? await processPendingDeletions(calendar) : 0;
   const updated = hasUpdates
     ? await processPendingUpdates(calendar, await fetchEventColorMap(calendar), new Map())
     : 0;
-  return { deleted, updated };
+  const scoped = hasScoped ? await processScopedOperations(calendar, new Map())
+    : { completed: 0, retry: 0, error: 0, conflict: 0 };
+  return { deleted, updated, scoped };
 }
 
 // --------------------------------------------------------
@@ -366,6 +1173,8 @@ function setCalendarEnabled(calendarId, enabled, meta = {}) {
       name    = COALESCE(excluded.name, google_calendar_selection.name),
       color   = COALESCE(excluded.color, google_calendar_selection.color)
   `).run(id, meta.name || id, meta.color || null, flag);
+  const cached = readJsonConfig(googleCalendarMetaKey(id));
+  persistGoogleAccessRole(id, meta.accessRole ?? cached?.access_role ?? null);
 
   if (!enabled) {
     db.get().prepare(`
@@ -415,6 +1224,7 @@ async function listCalendars() {
   do {
     const res = await calendar.calendarList.list({ pageToken, maxResults: 250 });
     for (const cal of res.data.items || []) {
+      persistGoogleCalendarMetadata(cal.id, cal);
       items.push({
         id:              cal.id,
         summary:         cal.summaryOverride || cal.summary || cal.id,
@@ -422,7 +1232,11 @@ async function listCalendars() {
         backgroundColor: cal.backgroundColor || GOOGLE_COLOR,
         enabled:         enabledSet.has(cal.id),
         accessRole:      cal.accessRole ?? null,
-        writable:        isWritableRole(cal.accessRole),
+        writable:        cal.accessRole ? isWritableRole(cal.accessRole) : null,
+        readOnly:        cal.accessRole ? !isWritableRole(cal.accessRole) : false,
+        readOnlyReason:  cal.accessRole
+          ? (isWritableRole(cal.accessRole) ? null : 'provider_readonly')
+          : 'provider_capability_unknown',
         default_assignee_user_id: assigneeMap.get(cal.id) ?? null,
         synced:          assigneeMap.has(cal.id),
       });
@@ -601,6 +1415,10 @@ async function runSync() {
     if (removed) log.info(`${removed} pending deletion(s) applied at Google.`);
     const pushed = await processPendingUpdates(calendar, eventColorMap, metaCache);
     if (pushed) log.info(`${pushed} local change(s) pushed to Google.`);
+    const scoped = await processScopedOperations(calendar, metaCache);
+    if (scoped.completed || scoped.retry || scoped.error || scoped.conflict) {
+      log.info(`Scoped Google edits: ${scoped.completed} completed, ${scoped.retry} retry, ${scoped.error} error, ${scoped.conflict} conflict.`);
+    }
   }
 
   // --------------------------------------------------------
@@ -689,12 +1507,13 @@ async function runSync() {
         // Die elf `colorId`s sind eine verlustbehaftete Abbildung des Hex-Werts -
         // ohne das Flag holte der nächste Inbound-Lauf die gemappte Farbe zurück
         // und ersetzte damit die gewählte (#899).
-        db.get().prepare(`
-          UPDATE calendar_events
-          SET external_calendar_id = ?, external_source = 'google', calendar_ref_id = ?,
-              color_modified = CASE WHEN color IS NOT NULL THEN 1 ELSE color_modified END
-          WHERE id = ?
-        `).run(created.data.id, calRefId, event.id);
+          db.get().prepare(`
+            UPDATE calendar_events
+            SET external_calendar_id = ?, external_source = 'google', calendar_ref_id = ?,
+                outbound_dirty = 0, outbound_attempts = 0, outbound_move_to = NULL,
+                color_modified = CASE WHEN color IS NOT NULL THEN 1 ELSE color_modified END
+            WHERE id = ?
+          `).run(created.data.id, calRefId, event.id);
       } catch (err) {
         log.error(`Outbound error for event ${event.id}:`, err.message);
       }
@@ -804,6 +1623,8 @@ function originalStartDate(item) {
 }
 
 function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, colorMap = {}, { fullResync = false, calTimeZone = null } = {}) {
+  const activeScopedOperations = typeof editOperations.activeCalendarEditOperations === 'function'
+    ? editOperations.activeCalendarEditOperations('google', db.get()) : [];
   // Auf den meldenden Kalender eingegrenzt: wird ein Event in Google von Kalender
   // A nach B verschoben, meldet A es als 'cancelled', während B es als aktiv
   // liefert - bei beiden dieselbe Event-ID. Ein ID-only-DELETE löscht dann je
@@ -852,9 +1673,19 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
   if (createdBy === null) log.warn('No user in database - new events are not imported.');
 
   const insertOrUpdate = db.get().transaction((item) => {
+    // Keep the provider ETag observed with this import. Scoped edits are
+    // queued later, after the local transaction, and must still be able to
+    // send the same conditional baseline to Google.
+    persistGoogleEventMetadata(currentGoogleCalendarId({ calendar_ref_id: calRefId }), item);
     // Löschung aus diesem Kalender - eine Zeile, die inzwischen zu einem anderen
     // Kalender gehört, ist davon nicht gemeint.
     if (item.status === 'cancelled') {
+      const removed = findLocal.get(item.id);
+      if (removed && !item.recurringEventId) {
+        const retained = activeScopedOperations.filter((operation) => operation.payload?.split_reload_dependency?.parent_event_id === removed.id);
+        if (retained.length) editOperations.retainCalendarRecoveryError(retained, 'recovery_occurrence_missing',
+          'The selected occurrence no longer exists. Review changes and the original series, choose an existing occurrence, or discard unsaved changes.', db.get());
+      }
       // Abgesagtes Einzelvorkommen einer Serie: nicht die Serie löschen, sondern
       // genau dieses Datum aus ihr ausnehmen.
       if (item.recurringEventId) {
@@ -916,11 +1747,16 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
       'SELECT id, outbound_dirty FROM calendar_events WHERE external_calendar_id = ? AND external_source = ?'
     ).get(item.id, 'google');
 
+    // Store the remote baseline even while a local edit is waiting. The next
+    // scoped operation must compare against the latest provider revision rather
+    // than silently overwriting a concurrent Google change.
+    persistGoogleEventRevision(item.id, item.etag);
+
     // Eine lokale Bearbeitung, die noch auf ihren Push wartet, darf der Inbound
     // nicht mit dem alten Google-Stand überschreiben (#593). Der Push kommt im
     // selben Lauf davor; kommt er nicht durch, gewinnt die lokale Änderung bis
     // sie durchgeht - sonst verschwände sie beim Nutzer ohne jede Spur.
-    if (existing?.outbound_dirty) return;
+    if (existing?.outbound_dirty || activeGoogleOperationTouches(item, activeScopedOperations, currentGoogleCalendarId({ calendar_ref_id: calRefId }))) return;
 
     if (existing) {
       // color nur überschreiben, solange der Nutzer nicht lokal umgefärbt hat
@@ -972,6 +1808,7 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'google', ?, ?, ?, ?)
       `).run(title, description, startDt, endDt, allDay ? 1 : 0, location, evColor, item.id, rrule, tzid, calRefId, createdBy);
       assignDefaultToEvent(db.get(), inserted.lastInsertRowid, defaultAssignee);
+      persistGoogleEventRevision(item.id, item.etag);
     }
 
     // EXDATEs, die Google an der Serie selbst führt, als Ausnahmen ablegen.
@@ -979,6 +1816,8 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
       const row = findLocal.get(item.id);
       if (row) for (const date of exdatesOf(item)) insException.run(row.id, date);
     }
+    const refreshed = findLocal.get(item.id);
+    if (refreshed && !item.recurringEventId) recoverFollowingCalendarEditAfterReadback(refreshed.id, 'google', db.get());
   });
 
   // Master vor ihren Ausnahmen: ein Ausnahme-Vorkommen braucht die Master-Zeile,
@@ -1181,6 +2020,7 @@ export const __test = {
   fetchEventColorMap, householdTimeZone,
   processPendingDeletions, pendingDeletionCount,
   processPendingUpdates, pendingUpdateCount,
+  processScopedOperations,
   googleCalendarIdForEvent, currentGoogleCalendarId, loadCalendarMeta,
   // Providerunabhängige Vormerkung: durchgereicht, damit die Google-Suite die
   // Kette Vormerken → Ausführen weiterhin an einem Stück prüfen kann.

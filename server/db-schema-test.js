@@ -128,6 +128,14 @@ const MIGRATIONS_SQL = {
                                    CHECK(external_source IN ('local', 'google', 'apple')),
       recurrence_rule      TEXT,
       visibility           TEXT    NOT NULL DEFAULT 'all',
+      edit_revision        INTEGER NOT NULL DEFAULT 1,
+      sync_state           TEXT    NOT NULL DEFAULT 'clean'
+                                   CHECK(sync_state IN ('clean', 'pending', 'error')),
+      sync_error           TEXT,
+      provider_revision    TEXT,
+      exception_of_event_id INTEGER REFERENCES calendar_events(id) ON DELETE CASCADE,
+      exception_original_start TEXT,
+      exception_original_end TEXT,
       created_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
       updated_at           TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
@@ -315,6 +323,29 @@ const MIGRATIONS_SQL = {
       event_id INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,
       user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       PRIMARY KEY (event_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_calendar_exception_parent
+      ON calendar_events(exception_of_event_id)
+      WHERE exception_of_event_id IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS calendar_edit_operations (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id          INTEGER REFERENCES calendar_events(id) ON DELETE SET NULL,
+      source            TEXT NOT NULL CHECK(source IN ('google', 'caldav', 'apple')),
+      scope             TEXT NOT NULL CHECK(scope IN ('this', 'following', 'series')),
+      operation         TEXT NOT NULL DEFAULT 'scoped_edit',
+      occurrence_start  TEXT,
+      payload_json      TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending', 'processing', 'retry', 'error', 'completed')),
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      last_error        TEXT,
+      created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      claimed_at        TEXT,
+      claim_expires_at  TEXT,
+      retryable         INTEGER NOT NULL DEFAULT 1 CHECK(retryable IN (0, 1)),
+      completed_at      TEXT
     );
   `,
   2: `
@@ -1112,6 +1143,59 @@ const MIGRATIONS_SQL = {
         WHERE id = NEW.id;
       END;
     `,
+  // SQL-String für Migration v194 (gespiegelt aus db.js): revisions and the
+  // durable provider queue for server-authoritative scoped calendar edits.
+  194: `
+    ALTER TABLE calendar_events ADD COLUMN edit_revision INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE calendar_events ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'clean'
+      CHECK(sync_state IN ('clean', 'pending', 'error'));
+    ALTER TABLE calendar_events ADD COLUMN sync_error TEXT;
+    ALTER TABLE calendar_events ADD COLUMN provider_revision TEXT;
+    ALTER TABLE calendar_events ADD COLUMN exception_of_event_id INTEGER
+      REFERENCES calendar_events(id) ON DELETE CASCADE;
+    ALTER TABLE calendar_events ADD COLUMN exception_original_start TEXT;
+    ALTER TABLE calendar_events ADD COLUMN exception_original_end TEXT;
+    CREATE INDEX IF NOT EXISTS idx_calendar_exception_parent
+      ON calendar_events(exception_of_event_id)
+      WHERE exception_of_event_id IS NOT NULL;
+    ALTER TABLE caldav_calendar_selection ADD COLUMN write_capability TEXT NOT NULL DEFAULT 'unknown'
+      CHECK(write_capability IN ('unknown', 'read', 'write'));
+    ALTER TABLE google_calendar_selection ADD COLUMN access_role TEXT;
+    CREATE TABLE IF NOT EXISTS calendar_edit_operations (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id          INTEGER REFERENCES calendar_events(id) ON DELETE SET NULL,
+      source            TEXT NOT NULL CHECK(source IN ('google', 'caldav', 'apple')),
+      scope             TEXT NOT NULL CHECK(scope IN ('this', 'following', 'series')),
+      operation         TEXT NOT NULL DEFAULT 'scoped_edit',
+      occurrence_start  TEXT,
+      payload_json      TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'pending'
+                        CHECK(status IN ('pending', 'processing', 'retry', 'error', 'completed')),
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      last_error        TEXT,
+      created_by        INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+      claimed_at        TEXT,
+      claim_expires_at  TEXT,
+      retryable         INTEGER NOT NULL DEFAULT 1 CHECK(retryable IN (0, 1)),
+      completed_at      TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_calendar_edit_operations_pending
+      ON calendar_edit_operations(source, status, id);
+    CREATE INDEX IF NOT EXISTS idx_calendar_edit_operations_event
+      ON calendar_edit_operations(event_id, status, id);
+  `,
+  195: `
+    ALTER TABLE calendar_edit_operations ADD COLUMN claim_token TEXT;
+    ALTER TABLE calendar_edit_operations ADD COLUMN claim_generation INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE calendar_edit_operations ADD COLUMN progress_json TEXT;
+    ALTER TABLE calendar_edit_operations ADD COLUMN progress_updated_at TEXT;
+    ALTER TABLE calendar_edit_operations ADD COLUMN failure_kind TEXT;
+    ALTER TABLE calendar_edit_operations ADD COLUMN resolution TEXT;
+    CREATE INDEX IF NOT EXISTS idx_calendar_edit_operations_claim
+      ON calendar_edit_operations(status, claim_expires_at, claim_generation);
+  `,
 };
 
 export { MIGRATIONS_SQL };

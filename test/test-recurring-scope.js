@@ -403,19 +403,15 @@ test('Ein Schnitt am ersten Vorkommen wuerde die Serie leeren - deshalb die Rege
   assert.equal(uebrig.length, 0, `der Schnitt liesse nichts stehen: ${gekuerzt}`);
 });
 
-test('Jeder Schnitt der Regel nimmt den Serienanfang aus', () => {
-  // ALS REGEL UEBER ALLE AUFRUFSTELLEN, NICHT ALS LISTE VON ZWEIEN. Bearbeiten
-  // und Loeschen hatten dieselbe Annahme doppelt stehen ("erstes Vorkommen ==
-  // gespeichertes Datum"), und der Fix traf beide - eine dritte Stelle wuerde
-  // ihn genauso brauchen. Der Guard prueft deshalb, was fuer jede gilt.
-  const bloecke = calendarSrc.split(/\n(?=(?:async )?function )/);
-  const schnitte = bloecke.filter((b) => b.includes('truncateRuleBefore('));
-  assert.ok(schnitte.length >= 2,
-    `erwartet mindestens zwei Schnittstellen (Bearbeiten + Loeschen), gefunden ${schnitte.length}`);
-  for (const b of schnitte) {
-    const name = (b.match(/^(?:async )?function (\w+)/) || [, '(anonym)'])[1];
-    assert.ok(b.includes('followingMeansWholeSeries('),
-      `${name}: kuerzt die Regel, ohne den Serienanfang auszunehmen - am ersten `
-      + 'Vorkommen entstuende eine leere Serie, die der Server ablehnt');
-  }
+test('Der lokale Loeschschnitt nimmt den Serienanfang aus', () => {
+  // Bearbeiten laeuft inzwischen ueber den serverautoritativen Scope-Pfad;
+  // nur der lokale Undo-Loeschpfad kuerzt weiterhin eine RRULE. Die
+  // Erstvorkommensregel bleibt deshalb genau an diesem einen Aufruf sichtbar.
+  const block = calendarSrc
+    .split(/\n(?=(?:async )?function )/)
+    .find((part) => part.includes('function deleteThisAndFollowing'));
+  assert.ok(block, 'deleteThisAndFollowing ist nicht auffindbar');
+  assert.match(block, /truncateRuleBefore\(/);
+  assert.match(block, /followingMeansWholeSeries\(/,
+    'der Loeschschnitt darf am ersten Vorkommen keine leere Serie bauen');
 });
