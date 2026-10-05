@@ -257,6 +257,11 @@ test('planner recipe reading preserves quantities, actions, keyboard focus, drag
     await page.waitForSelector('.recipe-reader');
     assert.equal(await page.$eval('.modal-panel', (el) => el.getBoundingClientRect().width <= window.innerWidth), true);
     assert.match(await page.$eval('.recipe-reader', (el) => el.textContent), /400 g Fixture flour/);
+    await page.$eval('.modal-panel__body', (body) => { body.scrollTop = body.scrollHeight; });
+    await page.waitForFunction(() => {
+      const rect = document.querySelector('[data-reader-page]').getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.bottom <= window.innerHeight;
+    });
     await page.click('[data-reader-page]');
     await page.waitForFunction(() => location.pathname === '/recipes');
     assert.ok((await page.url()).includes(`open=${recipe.id}`));
