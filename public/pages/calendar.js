@@ -5880,7 +5880,7 @@ function bindTaskSessionDrops(container) {
       try {
         await api.post(`/tasks/${taskId}/sessions`, {
           start_datetime: `${col.dataset.date}T${clickedTime(event, col)}`,
-          ...(displayTimeZone() ? { tzid: displayTimeZone() } : {}),
+          tzid: displayTimeZone() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         });
         await loadRange(state.rangeFrom, state.rangeTo);
         renderView();

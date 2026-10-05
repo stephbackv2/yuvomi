@@ -412,6 +412,7 @@ test('legacy instructions backfill once at unchanged timestamp, preserving recip
   const recipeId = Number(conn.prepare(`INSERT INTO recipes (title, created_by, provider_account_id, provider_recipe_id, provider_updated_at, provider_slug)
     VALUES ('Bread', ?, ?, 'bread-id', 't1', 'bread')`).run(OWNER, accountId).lastInsertRowid);
   const mealId = Number(conn.prepare(`INSERT INTO meals (title, date, meal_type, recipe_id, created_by) VALUES ('Bread meal', '2026-10-05', 'dinner', ?, ?)`).run(recipeId, OWNER).lastInsertRowid);
+  conn.prepare("INSERT INTO meal_ingredients (meal_id, name, quantity) VALUES (?, 'flour', '800 g')").run(mealId);
   const summaries = [{ id: 'bread-id', ref: 'bread', updatedAt: 't1' }];
   _setAdapterFactory(fakeAdapter(summaries, { bread: { id: 'bread-id', updatedAt: 't1', slug: 'bread', title: 'Bread', notes: 'Family recipe',
     instructions: ['Mix', 'Bake'], instructionsAvailable: true, ingredients: [{ name: 'flour', quantity: '400 g', category: 'Sonstiges' }] } }));
@@ -421,6 +422,7 @@ test('legacy instructions backfill once at unchanged timestamp, preserving recip
   const app = express();
   app.use((req, res, next) => { req.user = { id: Number(OWNER), role: 'member' }; next(); });
   app.use('/recipes', recipes);
+  app.use('/meals', (await import('../server/routes/meals.js')).default);
   const server = app.listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
   try {
@@ -430,7 +432,10 @@ test('legacy instructions backfill once at unchanged timestamp, preserving recip
     assert.equal(data.ingredients[0].quantity, '400 g');
     assert.equal(data.source, 'mealie');
     assert.match(data.recipe_url, /bread$/);
-    assert.equal(conn.prepare('SELECT recipe_id FROM meals WHERE id = ?').get(mealId).recipe_id, recipeId);
+    const mealRead = await (await fetch(`http://127.0.0.1:${server.address().port}/meals?from=2026-10-05&to=2026-10-05`)).json();
+    const meal = mealRead.data.find(row => row.id === mealId);
+    assert.equal(meal.recipe_id, recipeId);
+    assert.equal(meal.ingredients[0].quantity, '800 g');
     _setAdapterFactory(fakeAdapter(summaries, {}));
     assert.equal((await sync.syncOne(accountId)).updated, 0);
   } finally { await new Promise(resolve => server.close(resolve)); }

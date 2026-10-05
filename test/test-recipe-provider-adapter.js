@@ -256,3 +256,8 @@ test('categorizeIngredient: mehrwortiges Stichwort ("baking powder") matcht als 
 test('categorizeIngredient: kein Treffer → Fallback Sonstiges', () => {
   assert.equal(categorizeIngredient({ foodName: 'Xyzzy' }), 'Sonstiges');
 });
+
+test('listRecipeSummaries rejects a truncated collection with a larger stated total', async () => {
+  mockHandler((req, res) => sendJson(res, { items: [{ id: 'only', slug: 'only' }], total: 2, total_pages: 1 }));
+  await assert.rejects(() => new MealieAdapter(account).listRecipeSummaries(), /Incomplete/);
+});

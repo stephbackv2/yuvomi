@@ -326,3 +326,8 @@ test('fetchThumbnail: HTTP-Fehler wirft mit Statuscode', async () => {
   const adapter = new TandoorAdapter(account);
   await assert.rejects(() => adapter.fetchThumbnail({ slug: '/media/x.jpg' }), /Tandoor thumbnail request failed \(500\)/);
 });
+
+test('listRecipeSummaries rejects a truncated collection with a larger stated count', async () => {
+  mockHandler((req, res) => sendJson(res, { results: [{ id: 1 }], count: 2, next: null }));
+  await assert.rejects(() => new TandoorAdapter(account).listRecipeSummaries(), /Incomplete/);
+});

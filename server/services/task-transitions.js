@@ -143,7 +143,6 @@ function generatedDefinitionHash(taskId) {
     assignments: db.get().prepare('SELECT user_id FROM task_assignments WHERE task_id = ? ORDER BY user_id')
       .all(task.id).map((row) => row.user_id),
     tags: loadTags(db.get(), task.id).sort(),
-    sessions: db.get().prepare('SELECT id FROM calendar_events WHERE task_id = ? ORDER BY id').all(task.id).map(row => row.id),
     documents: db.get().prepare('SELECT document_id FROM task_documents WHERE task_id = ? ORDER BY document_id')
       .all(task.id).map((row) => row.document_id),
     comments: db.get().prepare('SELECT id, user_id, comment FROM task_comments WHERE task_id = ? ORDER BY id').all(task.id),
@@ -155,6 +154,8 @@ function generatedDefinitionHash(taskId) {
 }
 
 function isGeneratedFollowupTouched(followup) {
+  // Allocated work protects both snapshotted and pre-migration successors.
+  if (db.get().prepare('SELECT 1 FROM calendar_events WHERE task_id = ? LIMIT 1').get(followup.id)) return true;
   const snapshot = db.get().prepare('SELECT definition_hash FROM task_recurrence_snapshots WHERE task_id = ?').get(followup.id);
   if (snapshot) return snapshot.definition_hash !== generatedDefinitionHash(followup.id);
   // Older generated tasks have no snapshot. Keep the existing subtask guard

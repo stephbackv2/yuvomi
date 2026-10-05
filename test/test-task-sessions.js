@@ -1,4 +1,8 @@
-/** Public task scheduling and calendar reads against a migrated isolated DB. */
+/** Public task scheduling and calendar reads against a migrated isolated DB.
+ * The user-approved spec's application-request seam explicitly reuses this
+ * real router/HTTP integration pattern, overriding CONTRIBUTING's older direct
+ * handler guideline (.scratch/meal-calendar-task-planning/spec.md, Testing).
+ */
 process.env.DB_PATH = ':memory:';
 process.env.SESSION_SECRET = 'session-fixture';
 import test from 'node:test';
@@ -124,10 +128,12 @@ test('participant eligibility and scheduling somebody else preserve assignment a
 
 test('reopening a recurring origin retains a successor with allocated work', async () => {
   const { todayKey } = await import('../server/utils/timezone.js');
-  const parent = await task({ due_date: todayKey(db), is_recurring: true, recurrence_rule: 'FREQ=DAILY', recurrence_from_completion: true });
+  const parent = await task({ assigned_to: [users[0]], due_date: todayKey(db), is_recurring: true, recurrence_rule: 'FREQ=DAILY', recurrence_from_completion: true });
   await call('PATCH', `/tasks/${parent.id}/status`, { status: 'done' });
   const successor = (await call('GET', '/tasks?include_future=1')).data.find(t => t.recurrence_origin_id === parent.id);
   assert.ok(successor);
+  // Fixture represents a successor created before snapshot migration 197.
+  db.prepare('DELETE FROM task_recurrence_snapshots WHERE task_id = ?').run(successor.id);
   assert.equal((await call('POST', `/tasks/${successor.id}/sessions`, interval)).status, 201);
   await call('PATCH', `/tasks/${parent.id}/status`, { status: 'open' });
   assert.equal((await call('GET', `/tasks/${successor.id}`)).status, 200);

@@ -17,7 +17,7 @@
  *               server/utils/ssrf.js, ./categorize.js
  */
 import { categorizeIngredient } from './categorize.js';
-import { normalizeCookingSteps } from './instructions.js';
+import { normalizeCookingSteps, assertCompleteRecipeList } from './instructions.js';
 import { safeRequest } from '../../utils/http.js';
 import { createGuardedLookup } from '../../utils/ssrf.js';
 // Opt-in RECIPE_PROVIDER_ALLOW_PRIVATE_NETWORK: one place for both adapters and
@@ -123,10 +123,12 @@ export class TandoorAdapter {
 
   async listRecipeSummaries() {
     const summaries = [];
+    let expectedCount = null;
     let path = `/api/recipe/?page=1&page_size=${PAGE_SIZE}`;
     while (path) {
       const res = await this.#request(path);
       const body = await readJson(res);
+      expectedCount = body.count ?? expectedCount;
       if (!Array.isArray(body.results)) throw new Error('Incomplete Tandoor recipe list.');
       for (const r of body.results) {
         if (r.id == null) throw new Error('Incomplete Tandoor recipe identity.');
@@ -139,6 +141,7 @@ export class TandoorAdapter {
       const next = body.next ? new URL(body.next, this.base) : null;
       path = next ? next.pathname + next.search : null;
     }
+    assertCompleteRecipeList(summaries, expectedCount);
     return summaries;
   }
 

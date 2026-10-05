@@ -9,3 +9,12 @@ export function normalizeCookingSteps(steps, textFor) {
     return parts.map((part) => (part || '').trim()).filter(Boolean).join('\n');
   }).filter(Boolean);
 }
+
+
+/** Providers may omit pagination totals, but a supplied total must be complete. */
+export function assertCompleteRecipeList(recipes, count) {
+  if (count == null) return;
+  if (!Number.isSafeInteger(count) || count < 0 || recipes.length !== count) {
+    throw new Error('Incomplete provider recipe collection.');
+  }
+}

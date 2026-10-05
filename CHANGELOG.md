@@ -29,6 +29,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Tasks can be dragged into local calendar work sessions.** The desktop
+  task panel reserves 30-minute blocks in day and week views, keeps tasks
+  available for further allocations, and preserves deadlines. Sessions inherit
+  task assignees and visibility, survive reloads, and open shared task details.
+  Mobile displays the allocations. Completion and archiving retain past work
+  while removing unfinished future blocks; parent deletion removes all blocks.
+- **Mealie and Tandoor recipes show ordered cooking instructions.** Existing
+  mirrors backfill on their next successful sync even without a timestamp
+  change. Recipe identities, meal links and saved quantities stay intact;
+  incomplete fetches preserve the last readable content.
+
 - **Meal-planner cards open a scrollable recipe reader.** Planned ingredients
   keep their saved quantities; recipe cards and meals without saved ingredient
   rows show labeled original quantities. Recipe instructions are stored separately

@@ -16,7 +16,7 @@
  *               server/utils/ssrf.js, ./categorize.js
  */
 import { categorizeIngredient } from './categorize.js';
-import { normalizeCookingSteps } from './instructions.js';
+import { normalizeCookingSteps, assertCompleteRecipeList } from './instructions.js';
 import { safeRequest } from '../../utils/http.js';
 import { createGuardedLookup } from '../../utils/ssrf.js';
 // Opt-in RECIPE_PROVIDER_ALLOW_PRIVATE_NETWORK: eine Stelle fuer beide Adapter
@@ -140,11 +140,13 @@ export class MealieAdapter {
   // summary.slug wird als `ref` für den Detail-Abruf gebraucht.
   async listRecipeSummaries() {
     const summaries = [];
+    let expectedCount = null;
     let page = 1;
     let totalPages = 1;
     do {
       const res = await this.#request(`/api/recipes?page=${page}&perPage=${PAGE_SIZE}`);
       const body = await readJson(res);
+      expectedCount = body.total ?? expectedCount;
       if (!Array.isArray(body.items)) throw new Error('Incomplete Mealie recipe list.');
       for (const item of body.items) {
         summaries.push({ id: item.id, ref: item.slug, updatedAt: item.updatedAt });
@@ -152,6 +154,7 @@ export class MealieAdapter {
       totalPages = body.total_pages || 1;
       page += 1;
     } while (page <= totalPages);
+    assertCompleteRecipeList(summaries, expectedCount);
     return summaries;
   }
 

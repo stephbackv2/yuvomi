@@ -103,6 +103,14 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
       await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
     }
     assert.equal((await request(page, 'get', '/tasks?include_future=1')).data.filter(t => t.recurrence_origin_id === parent.id).length, 0);
+    const past = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { start_datetime: '2001-01-01T10:00', tzid: 'UTC' })).data;
+    const future = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { start_datetime: '2090-01-01T10:00', tzid: 'UTC' })).data;
     await request(page, 'patch', `/tasks/${parent.id}/status`, { status: 'done' });
+    const history = (await request(page, 'get', `/tasks/${parent.id}/sessions`)).data;
+    assert.ok(history.some(session => session.id === past.id));
+    assert.ok(!history.some(session => session.id === future.id));
+    await request(page, 'delete', `/tasks/${parent.id}`);
+    const remaining = (await request(page, 'get', `/calendar?from=2001-01-01&to=2090-01-02`)).data;
+    assert.ok(!remaining.some(session => session.task_id === parent.id));
   } finally { await harness.close(); }
 });
