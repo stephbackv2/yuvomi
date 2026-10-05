@@ -148,6 +148,18 @@ test('getRecipe: kein Bild → hasImage=false, keine Notes → notes=null', asyn
   assert.equal(recipe.notes, null);
 });
 
+test('getRecipe: ordered cooking instructions stay separate from the description and ingredients', async () => {
+  mockHandler((_req, res) => sendJson(res, {
+    id: 'ordered', name: 'Bread', slug: 'bread', updatedAt: 't1', description: 'A family recipe',
+    recipeIngredient: [{ food: { name: 'flour' }, quantity: 2, unit: { name: 'cups' } }],
+    recipeInstructions: [{ title: 'Dough', text: '  Mix flour.  ' }, { text: 'Bake for 20 minutes.' }, { text: ' ' }],
+  }));
+  const recipe = await new MealieAdapter(account).getRecipe('bread');
+  assert.deepEqual(recipe.instructions, ['Dough\nMix flour.', 'Bake for 20 minutes.']);
+  assert.equal(recipe.notes, 'A family recipe');
+  assert.equal(recipe.ingredients[0].quantity, '2 cups');
+});
+
 test('getRecipe: HTTP-Fehler wirft mit Statuscode', async () => {
   mockHandler((req, res) => sendJson(res, {}, 404));
   const adapter = new MealieAdapter(account);

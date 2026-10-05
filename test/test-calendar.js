@@ -1700,6 +1700,7 @@ function fakeContainer() {
     replaceChildren: () => { html = ''; },
     insertAdjacentHTML: (_position, chunk) => { html += chunk; },
     querySelector: () => fakeDomElement(),
+    querySelectorAll: () => [],
     get html() { return html; },
   };
 }

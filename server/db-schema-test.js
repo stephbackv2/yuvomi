@@ -1196,6 +1196,8 @@ const MIGRATIONS_SQL = {
     CREATE INDEX IF NOT EXISTS idx_calendar_edit_operations_claim
       ON calendar_edit_operations(status, claim_expires_at, claim_generation);
   `,
+  199: `ALTER TABLE calendar_events ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE;
+    ALTER TABLE calendar_events ADD COLUMN session_status TEXT;`,
 };
 
 export { MIGRATIONS_SQL };

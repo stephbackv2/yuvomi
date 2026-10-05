@@ -13,6 +13,9 @@
  */
 
 import express from 'express';
+import * as db from '../db.js';
+import { sessionModuleAllowed } from '../services/task-sessions.js';
+import { visibilityWhere } from '../services/visibility.js';
 
 import readRouter from './calendar/read.js';
 import googleRouter from './calendar/google.js';
@@ -27,6 +30,22 @@ import editRouter from './calendar/edit.js';
 import { googleTarget } from './calendar/helpers.js';
 
 const router = express.Router();
+// Sessions are task commands. Ordinary event editors must not alter or publish
+// them, and clients without task access cannot read their calendar projection.
+router.use((req, res, next) => {
+  res.locals.taskSessionsReadable = sessionModuleAllowed(req);
+  const match = /^\/(\d+)(?:\/|$)/.exec(req.path);
+  if (match) {
+    const event = db.get().prepare('SELECT * FROM calendar_events WHERE id = ?').get(Number(match[1]));
+    if (event?.task_id) {
+      const visible = db.get().prepare(`SELECT e.id FROM calendar_events e WHERE e.id = ?
+        AND ${visibilityWhere('e', 'event_assignments', 'event_id')}`).get(event.id, req.authUserId || req.session?.userId, req.authUserId || req.session?.userId);
+      if (!visible || !res.locals.taskSessionsReadable) return res.status(404).json({ error: 'Task session not found.', code: 404 });
+      if (req.method !== 'GET') return res.status(409).json({ error: 'Use task session commands.', code: 409 });
+    }
+  }
+  next();
+});
 
 router.use(readRouter);
 router.use(googleRouter);

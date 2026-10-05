@@ -274,7 +274,7 @@ export function expandRecurringEvents(events, from, to, exceptionsByEvent = null
  * @returns {object[]}  Rohe, expandierte Event-Zeilen (inkl. assigned_users_json)
  */
 export function getUpcomingEvents(d, {
-  userId = null, limit = 5, windowDays = 90, fromToday = false, assignedTo = null,
+  userId = null, limit = 5, includeTaskSessions = true, windowDays = 90, fromToday = false, assignedTo = null,
   includeBirthdays = true, now = new Date(),
 } = {}) {
   const tz      = householdTimeZone(d);
@@ -327,6 +327,7 @@ export function getUpcomingEvents(d, {
       )
     )
     AND ${visibilityWhere('e', 'event_assignments', 'event_id')}
+    ${includeTaskSessions ? '' : 'AND e.task_id IS NULL'}
     ORDER BY e.start_datetime ASC
   `).all(sqlFrom, future, future, userId, userId, userId);
 

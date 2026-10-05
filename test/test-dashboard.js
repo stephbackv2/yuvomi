@@ -1489,6 +1489,10 @@ const cu2 = cdb.prepare(`INSERT INTO users (username, display_name, password_has
 const cuTheo = cu1.lastInsertRowid;
 const cuSofia = cu2.lastInsertRowid;
 
+cdb.exec(`ALTER TABLE calendar_events ADD COLUMN task_id INTEGER;
+  CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY, visibility TEXT, created_by INTEGER);
+  CREATE TABLE IF NOT EXISTS task_assignments (task_id INTEGER, user_id INTEGER);`);
+
 function insertEvent(fields) {
   const cols = Object.keys(fields);
   const placeholders = cols.map(() => '?').join(', ');

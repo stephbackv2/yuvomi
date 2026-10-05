@@ -1,3 +1,5 @@
+import { visibilityWhere } from './visibility.js';
+import { resolvePermissions } from '../permissions.js';
 /**
  * Modul: ICS-Export
  * Zweck: Erzeugt einen read-only iCalendar-Feed (VCALENDAR) aus den für einen
@@ -209,6 +211,8 @@ function buildFeed(conn, userId, now = new Date(), tz = householdTimeZone(conn))
 
   // Identische Sichtbarkeitslogik wie GET /api/v1/calendar:
   // alle Events außer fremden, nicht-geteilten ICS-Abos.
+  const user = conn.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+  const canReadTasks = user && resolvePermissions(conn, user).modules.tasks !== 'none';
   const showAssignees = !!conn.prepare(
     `SELECT calendar_feed_show_assignees AS v FROM users WHERE id = ?`
   ).get(userId)?.v;
@@ -237,8 +241,9 @@ function buildFeed(conn, userId, now = new Date(), tz = householdTimeZone(conn))
       e.recurrence_rule IS NOT NULL
       OR DATE(e.start_datetime) >= ?
     )
+    AND (e.task_id IS NULL OR (${canReadTasks ? '1' : '0'} AND ${visibilityWhere('e', 'event_assignments', 'event_id')}))
     ORDER BY e.start_datetime ASC
-  `).all(userId, windowStart)
+  `).all(userId, windowStart, userId, userId)
     .filter(ev => !isRecurrenceExpired(ev.recurrence_rule, windowStart));
 
   // Instanz-Ausnahmen (EXDATE, #489) für die wiederkehrenden Events des Feeds laden.

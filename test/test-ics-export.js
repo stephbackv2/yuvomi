@@ -62,11 +62,16 @@ d2.exec(`CREATE TABLE users (
   display_name TEXT NOT NULL, password_hash TEXT NOT NULL,
   avatar_color TEXT NOT NULL DEFAULT '#007AFF', role TEXT NOT NULL DEFAULT 'member',
   created_at TEXT DEFAULT '', updated_at TEXT DEFAULT '');`);
+d2.exec(`CREATE TABLE tasks (id INTEGER PRIMARY KEY, created_by INTEGER, visibility TEXT);
+  CREATE TABLE task_assignments (task_id INTEGER, user_id INTEGER);`);
 d2.exec(MIGRATIONS_SQL[10]);
 d2.exec(MIGRATIONS_SQL[11]);
 d2.exec(MIGRATIONS_SQL[61]);
 d2.exec(MIGRATIONS_SQL[80]);
 d2.exec(MIGRATIONS_SQL[85]); // calendar_event_exceptions (EXDATE, #489)
+d2.exec(MIGRATIONS_SQL[74]);
+d2.exec(`ALTER TABLE calendar_events ADD COLUMN visibility TEXT NOT NULL DEFAULT 'all';`);
+d2.exec(MIGRATIONS_SQL[199]);
 d2.exec(MIGRATIONS_SQL[97]); // calendar_events.tzid (DST-Export, #549)
 d2.exec(`CREATE TABLE IF NOT EXISTS event_assignments (
   event_id INTEGER NOT NULL REFERENCES calendar_events(id) ON DELETE CASCADE,

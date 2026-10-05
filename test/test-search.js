@@ -25,6 +25,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
   applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );`);
 db.exec(MIGRATIONS_SQL[1]);
+db.exec(MIGRATIONS_SQL[199]);
 // Migration 44: FTS5 index + sync triggers. Must apply cleanly.
 db.exec(MIGRATIONS_SQL[44]);
 // Migration 65: health tables (medications, health_activities) the search reads from.

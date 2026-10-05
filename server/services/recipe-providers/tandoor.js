@@ -17,6 +17,7 @@
  *               server/utils/ssrf.js, ./categorize.js
  */
 import { categorizeIngredient } from './categorize.js';
+import { normalizeCookingSteps } from './instructions.js';
 import { safeRequest } from '../../utils/http.js';
 import { createGuardedLookup } from '../../utils/ssrf.js';
 // Opt-in RECIPE_PROVIDER_ALLOW_PRIVATE_NETWORK: one place for both adapters and
@@ -126,7 +127,9 @@ export class TandoorAdapter {
     while (path) {
       const res = await this.#request(path);
       const body = await readJson(res);
-      for (const r of body.results || []) {
+      if (!Array.isArray(body.results)) throw new Error('Incomplete Tandoor recipe list.');
+      for (const r of body.results) {
+        if (r.id == null) throw new Error('Incomplete Tandoor recipe identity.');
         summaries.push({ id: String(r.id), ref: String(r.id), updatedAt: r.updated_at });
       }
       // body.next is DRF's self-reported absolute URL, which can name a host that
@@ -142,6 +145,10 @@ export class TandoorAdapter {
   async getRecipe(ref) {
     const res = await this.#request(`/api/recipe/${encodeURIComponent(ref)}/`);
     const detail = await readJson(res);
+    if (!Array.isArray(detail.steps)) throw new Error('Invalid Tandoor recipe steps.');
+    const steps = [...(detail.steps || [])].sort((a, b) => (a?.order ?? 0) - (b?.order ?? 0));
+    if (steps.some(step => !Array.isArray(step?.ingredients))) throw new Error('Incomplete Tandoor ingredients.');
+    const instructions = normalizeCookingSteps(steps, (step) => [step.name, step.instruction]);
     const ingredients = (detail.steps || [])
       .flatMap((step) => step.ingredients || [])
       .map(flattenIngredient)
@@ -159,6 +166,8 @@ export class TandoorAdapter {
       slug: detail.image || null,
       title: detail.name,
       notes: detail.description || null,
+      instructions,
+      instructionsAvailable: steps.length === 0 || steps.every(step => typeof step.instruction === 'string' || (step.show_as_header === true && typeof step.name === 'string')),
       hasImage: Boolean(detail.image),
       ingredients,
     };

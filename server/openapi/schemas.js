@@ -12,6 +12,14 @@ const noteInputProperties = {
 };
 
 export const schemas = {
+        TaskSessionCreate: {
+          type: 'object', required: ['start_datetime'],
+          properties: {
+            start_datetime: { type: 'string', description: 'ISO date and time, with an explicit offset or wall time in tzid.', examples: ['2026-10-05T10:15', '2026-10-05T08:15:00Z'] },
+            end_datetime: { type: 'string', description: 'Positive interval end; omitted means 30 minutes after start.' },
+            tzid: { type: 'string', description: 'IANA timezone; defaults to the household zone.', examples: ['Europe/Berlin'] },
+          },
+        },
         ApiError: {
           type: 'object',
           properties: {
@@ -452,6 +460,9 @@ export const schemas = {
           type: 'object',
           description: 'Calendar event. New attachments use document URLs; attachment_data remains available for legacy stored blobs.',
           properties: {
+            task_id: { type: ['integer', 'null'], description: 'Parent task for a work allocation; otherwise null.' },
+            session_status: { type: ['string', 'null'], enum: ['unfinished', 'completed', null] },
+            session_assignment_mode: { type: ['string', 'null'], enum: ['inherited', 'override', null] },
             id: { type: 'integer' },
             revision: {
               type: 'string',

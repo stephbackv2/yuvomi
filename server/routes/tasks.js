@@ -6,6 +6,7 @@
 
 import { createLogger } from '../logger.js';
 import express from 'express';
+import taskSessionsRouter from './task-sessions.js';
 import * as db from '../db.js';
 import { documentVisibleSql } from '../services/document-access.js';
 import { assertDocumentsNotDeleting, sendDocumentDeletionConflict } from '../services/document-deletion-lock.js';
@@ -76,6 +77,7 @@ function resolveTaskSyncTarget(value) {
 }
 
 const router = express.Router();
+router.use(taskSessionsRouter);
 
 // --------------------------------------------------------
 // Konstanten

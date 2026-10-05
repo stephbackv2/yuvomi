@@ -405,3 +405,51 @@ test('sync(): eine Lookup-Ablehnung schreibt last_error MIT dem Schalter, ein an
   const plain = conn.prepare('SELECT last_error FROM recipe_provider_accounts WHERE id = ?').get(accountId);
   assert.equal(plain.last_error, 'network down', 'kein Hinweis, wo er nicht hingehoert');
 });
+
+
+test('legacy instructions backfill once at unchanged timestamp, preserving recipe and meal links', async () => {
+  const accountId = newAccount('Backfill');
+  const recipeId = Number(conn.prepare(`INSERT INTO recipes (title, created_by, provider_account_id, provider_recipe_id, provider_updated_at, provider_slug)
+    VALUES ('Bread', ?, ?, 'bread-id', 't1', 'bread')`).run(OWNER, accountId).lastInsertRowid);
+  const mealId = Number(conn.prepare(`INSERT INTO meals (title, date, meal_type, recipe_id, created_by) VALUES ('Bread meal', '2026-10-05', 'dinner', ?, ?)`).run(recipeId, OWNER).lastInsertRowid);
+  const summaries = [{ id: 'bread-id', ref: 'bread', updatedAt: 't1' }];
+  _setAdapterFactory(fakeAdapter(summaries, { bread: { id: 'bread-id', updatedAt: 't1', slug: 'bread', title: 'Bread', notes: 'Family recipe',
+    instructions: ['Mix', 'Bake'], instructionsAvailable: true, ingredients: [{ name: 'flour', quantity: '400 g', category: 'Sonstiges' }] } }));
+  assert.equal((await sync.syncOne(accountId)).updated, 1);
+  const express = (await import('express')).default;
+  const recipes = (await import('../server/routes/recipes.js')).default;
+  const app = express();
+  app.use((req, res, next) => { req.user = { id: Number(OWNER), role: 'member' }; next(); });
+  app.use('/recipes', recipes);
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  try {
+    const { data } = await (await fetch(`http://127.0.0.1:${server.address().port}/recipes/${recipeId}`)).json();
+    assert.deepEqual(data.instructions, ['Mix', 'Bake']);
+    assert.equal(data.notes, 'Family recipe');
+    assert.equal(data.ingredients[0].quantity, '400 g');
+    assert.equal(data.source, 'mealie');
+    assert.match(data.recipe_url, /bread$/);
+    assert.equal(conn.prepare('SELECT recipe_id FROM meals WHERE id = ?').get(mealId).recipe_id, recipeId);
+    _setAdapterFactory(fakeAdapter(summaries, {}));
+    assert.equal((await sync.syncOne(accountId)).updated, 0);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('missing instructions settle backfill; incomplete details preserve content and prevent pruning', async () => {
+  const accountId = newAccount('Incomplete');
+  const summaries = [{ id: 'keep', ref: 'keep', updatedAt: 't1' }, { id: 'other', ref: 'other', updatedAt: 't1' }];
+  const recipe = (id, instructions = ['Keep cooking']) => ({ id, updatedAt: 't1', slug: id, title: id, instructions, ingredients: [] });
+  _setAdapterFactory(fakeAdapter(summaries, { keep: recipe('keep'), other: recipe('other', []) }));
+  await sync.syncOne(accountId);
+  _setAdapterFactory(fakeAdapter([{ id: 'keep', ref: 'keep', updatedAt: 't2' }], { keep: { ...recipe('keep'), updatedAt: 't2', ingredients: undefined } }));
+  assert.equal((await sync.syncOne(accountId)).failed, true);
+  assert.equal(mirroredRecipes(accountId).length, 2);
+  const row = conn.prepare("SELECT id, instructions FROM recipes WHERE provider_account_id = ? AND provider_recipe_id = 'keep'").get(accountId);
+  assert.deepEqual(JSON.parse(row.instructions), ['Keep cooking']);
+  _setAdapterFactory(fakeAdapter([{ id: 'keep', ref: 'keep', updatedAt: 't2' }], { keep: { ...recipe('keep', []), updatedAt: 't2', instructionsAvailable: false } }));
+  assert.equal((await sync.syncOne(accountId)).failed, false);
+  assert.deepEqual(JSON.parse(conn.prepare('SELECT instructions FROM recipes WHERE id = ?').get(row.id).instructions), ['Keep cooking']);
+  _setAdapterFactory(fakeAdapter([{ id: 'keep', ref: 'keep', updatedAt: 't2' }], {}));
+  assert.equal((await sync.syncOne(accountId)).updated, 0);
+});

@@ -16,6 +16,7 @@
  *               server/utils/ssrf.js, ./categorize.js
  */
 import { categorizeIngredient } from './categorize.js';
+import { normalizeCookingSteps } from './instructions.js';
 import { safeRequest } from '../../utils/http.js';
 import { createGuardedLookup } from '../../utils/ssrf.js';
 // Opt-in RECIPE_PROVIDER_ALLOW_PRIVATE_NETWORK: eine Stelle fuer beide Adapter
@@ -144,7 +145,8 @@ export class MealieAdapter {
     do {
       const res = await this.#request(`/api/recipes?page=${page}&perPage=${PAGE_SIZE}`);
       const body = await readJson(res);
-      for (const item of body.items || []) {
+      if (!Array.isArray(body.items)) throw new Error('Incomplete Mealie recipe list.');
+      for (const item of body.items) {
         summaries.push({ id: item.id, ref: item.slug, updatedAt: item.updatedAt });
       }
       totalPages = body.total_pages || 1;
@@ -156,12 +158,18 @@ export class MealieAdapter {
   async getRecipe(ref) {
     const res = await this.#request(`/api/recipes/${encodeURIComponent(ref)}`);
     const detail = await readJson(res);
+    if (!Array.isArray(detail.recipeIngredient)) throw new Error('Incomplete Mealie recipe detail.');
     return {
       id: detail.id,
       updatedAt: detail.updatedAt,
       slug: detail.slug,
       title: detail.name,
       notes: detail.description || null,
+      instructions: normalizeCookingSteps(detail.recipeInstructions, (step) => {
+        if (typeof step.text !== 'string') throw new Error('Incomplete Mealie cooking step.');
+        return [step.title, step.text];
+      }),
+      instructionsAvailable: detail.recipeInstructions != null,
       hasImage: Boolean(detail.image),
       ingredients: (detail.recipeIngredient || []).map(flattenIngredient),
     };

@@ -30,6 +30,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
   applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
 );`);
 db.exec(MIGRATIONS_SQL[1]);
+db.exec(MIGRATIONS_SQL[199]);
 db.exec(MIGRATIONS_SQL[41]);  // tasks.start_date (geplante Aufgaben)
 db.exec(MIGRATIONS_SQL[74]);  // access_permissions (Modulrechte, #467)
 // DIESE DREI SIND EINE AUSWAHL, KEIN SCHEMA: Migration 1 legt `tasks` in der

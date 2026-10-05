@@ -48,15 +48,21 @@ async function syncAccount(account) {
   let linkContext = null;
   try {
     const test = await adapter.testConnection();
+    if (!test.ok) throw new Error(test.error || 'Provider connection failed.');
     linkContext = test.linkContext || null;
     summaries = await adapter.listRecipeSummaries();
+    if (!Array.isArray(summaries) || summaries.some(r => !r?.id || !r.ref)
+      || new Set(summaries.map(r => String(r.id))).size !== summaries.length) {
+      throw new Error('Incomplete provider recipe list.');
+    }
+    summaries = summaries.map(r => ({ ...r, id: String(r.id) }));
   } catch (err) {
     log.error(`Account ${account.id} ("${account.name}"): fetch failed, skipping this pass:`, err.message);
     return { imported: 0, updated: 0, deleted: 0, failed: true, error: err.message };
   }
 
   const existing = conn.prepare(
-    'SELECT id, provider_recipe_id, provider_updated_at, provider_slug, recipe_url FROM recipes WHERE provider_account_id = ?'
+    'SELECT id, provider_recipe_id, provider_updated_at, provider_slug, recipe_url, instructions, provider_instructions_version FROM recipes WHERE provider_account_id = ?'
   ).all(account.id);
   const existingByProviderId = new Map(existing.map((r) => [r.provider_recipe_id, r]));
 
@@ -66,6 +72,7 @@ async function syncAccount(account) {
   const seenIds = new Set();
   const toUpsert = [];
   const urlRefresh = [];
+  let fetchError = null;
 
   for (const summary of summaries) {
     // Providers stabiler Schlüssel (summary.id), NICHT summary.ref: der Ref
@@ -76,7 +83,7 @@ async function syncAccount(account) {
     // weiterhin für den Detail-Abruf gebraucht (adapter.getRecipe(ref)).
     seenIds.add(summary.id);
     const current = existingByProviderId.get(summary.id);
-    if (current && current.provider_updated_at === summary.updatedAt) {
+    if (current && current.provider_updated_at === summary.updatedAt && current.provider_instructions_version >= 1) {
       // Unverändert beim Provider - den vollen Detail-Abruf sparen, aber
       // recipe_url trotzdem aus den gespeicherten Feldern neu bauen: ein Sync ist
       // der einzige Moment, in dem eine nachträgliche external_url/base_url-
@@ -99,12 +106,18 @@ async function syncAccount(account) {
     let detail;
     try {
       detail = await adapter.getRecipe(summary.ref);
+      if (!detail || String(detail.id) !== summary.id || typeof detail.title !== 'string' || !detail.title.trim()
+        || !Array.isArray(detail.ingredients) || detail.ingredients.some(ing => !ing || typeof ing.name !== 'string')
+        || (detail.instructions != null && (!Array.isArray(detail.instructions) || detail.instructions.some(step => typeof step !== 'string')))) {
+        throw new Error('Incomplete provider recipe detail.');
+      }
     } catch (err) {
       log.error(`Account ${account.id}: failed to fetch recipe "${summary.ref}":`, err.message);
+      fetchError = err.message;
       continue; // nur dieses eine Rezept überspringen, Rest des Laufs weitermachen
     }
 
-    const recipeUrl = adapter.recipeUrl(linkContext, { id: detail.id, slug: detail.slug });
+    const recipeUrl = adapter.recipeUrl(linkContext, { id: detail.id, slug: detail.slug }) || current?.recipe_url || null;
     toUpsert.push({ current, detail, recipeUrl });
   }
 
@@ -112,18 +125,18 @@ async function syncAccount(account) {
   // diesmal gar keine Summaries, ist das eher ein stiller Server-/Auth-Fehler
   // als eine tatsächlich geleerte Sammlung - nicht löschen (vgl. calendar-prune.js).
   let stale = [];
-  if (summaries.length > 0 || existing.length === 0) {
+  if (!fetchError && (summaries.length > 0 || existing.length === 0)) {
     stale = existing.filter((r) => !seenIds.has(r.provider_recipe_id));
   } else if (existing.length > 0) {
     log.warn(`Account ${account.id} ("${account.name}"): provider returned no recipes, but ${existing.length} exist locally. Skipping deletion.`);
   }
 
   const insRecipe = conn.prepare(`
-    INSERT INTO recipes (title, notes, recipe_url, created_by, provider_account_id, provider_recipe_id, provider_updated_at, provider_slug, provider_has_image)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO recipes (title, notes, recipe_url, created_by, provider_account_id, provider_recipe_id, provider_updated_at, provider_slug, provider_has_image, instructions, provider_instructions_version)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
   `);
   const updRecipe = conn.prepare(`
-    UPDATE recipes SET title = ?, notes = ?, recipe_url = ?, provider_updated_at = ?, provider_slug = ?, provider_has_image = ? WHERE id = ?
+    UPDATE recipes SET title = ?, notes = ?, recipe_url = ?, provider_updated_at = ?, provider_slug = ?, provider_has_image = ?, instructions = ?, provider_instructions_version = 1 WHERE id = ?
   `);
   const updUrl = conn.prepare('UPDATE recipes SET recipe_url = ? WHERE id = ?');
   const delIngredients = conn.prepare('DELETE FROM recipe_ingredients WHERE recipe_id = ?');
@@ -138,15 +151,19 @@ async function syncAccount(account) {
   db.transaction(() => {
     for (const { current, detail, recipeUrl } of toUpsert) {
       const hasImage = detail.hasImage ? 1 : 0;
+      // Missing source fields preserve readable content; an explicit empty list
+      // is authoritative. Both successful passes settle the backfill marker.
+      const instructions = detail.instructionsAvailable !== false && detail.instructions != null
+        ? JSON.stringify(detail.instructions) : current?.instructions || '[]';
       let id;
       if (current) {
-        updRecipe.run(detail.title, detail.notes || null, recipeUrl, detail.updatedAt, detail.slug, hasImage, current.id);
+        updRecipe.run(detail.title, detail.notes || null, recipeUrl, detail.updatedAt, detail.slug, hasImage, instructions, current.id);
         id = current.id;
         updated++;
       } else {
         const result = insRecipe.run(
           detail.title, detail.notes || null, recipeUrl,
-          account.created_by, account.id, detail.id, detail.updatedAt, detail.slug, hasImage,
+          account.created_by, account.id, detail.id, detail.updatedAt, detail.slug, hasImage, instructions,
         );
         id = Number(result.lastInsertRowid);
         imported++;
@@ -158,7 +175,7 @@ async function syncAccount(account) {
     for (const r of stale) delRecipe.run(r.id);
   });
 
-  return { imported, updated, deleted: stale.length, failed: false };
+  return { imported, updated, deleted: stale.length, failed: !!fetchError, ...(fetchError ? { error: fetchError } : {}) };
 }
 
 /** Schreibt last_sync/last_error auf den Account nach einem Durchlauf. Gibt zurück, ob er erfolgreich war. */

@@ -7733,6 +7733,27 @@ const MIGRATIONS = [
       definition_hash TEXT NOT NULL
     );`,
   },
+  {
+    version: 198,
+    description: 'Provider recipes: one-time ordered instruction backfill',
+    up: `ALTER TABLE recipes ADD COLUMN provider_instructions_version INTEGER NOT NULL DEFAULT 0;`,
+  },
+  {
+    version: 199,
+    description: 'Tasks: durable local work allocations in the calendar',
+    up: `ALTER TABLE calendar_events ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE;
+      ALTER TABLE calendar_events ADD COLUMN session_status TEXT CHECK (session_status IN ('unfinished', 'completed'));
+      ALTER TABLE calendar_events ADD COLUMN session_assignment_mode TEXT CHECK (session_assignment_mode IN ('inherited', 'override'));
+      CREATE INDEX idx_calendar_task_sessions ON calendar_events(task_id, start_datetime);
+      -- Every task mutation path shares this lifecycle, including imports.
+      -- Started allocations remain history; only future unfinished blocks go.
+      CREATE TRIGGER task_sessions_finish AFTER UPDATE OF status, archived_at ON tasks
+      WHEN NEW.status = 'done' OR NEW.archived_at IS NOT NULL
+      BEGIN
+        DELETE FROM calendar_events WHERE task_id = NEW.id AND session_status = 'unfinished'
+          AND julianday(start_datetime) > julianday('now');
+      END;`,
+  },
 ];
 
 /**

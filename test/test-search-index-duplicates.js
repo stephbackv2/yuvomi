@@ -304,6 +304,8 @@ test(`Migration ${FIX_VERSION} räumt vorhandene Dubletten weg`, () => {
 
     // Der Index muss danach noch suchbar sein - eine Migration, die Zeilen aus
     // einer FTS5-Tabelle entfernt, darf ihn nicht beschädigen.
+    // Current reads also know task allocations; the index repair remains v151.
+    db.exec('ALTER TABLE calendar_events ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE;');
     const hits = runSearch(db, 'Buchweizen', userId).items;
     assert.equal(hits.length, 1);
     assert.equal(hits[0].title, 'Buchweizen');

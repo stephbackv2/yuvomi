@@ -5,6 +5,7 @@
  */
 
 import { api } from '/api.js';
+import { moduleAccess } from '/permissions.js';
 import { renderRRuleFields, bindRRuleEvents, getRRuleValues, recurrenceRow } from '/rrule-ui.js';
 import { openModal as openSharedModal, closeModal, confirmModal, advancedSection, wireBlurValidation, reportFieldError, refocusAfterRender } from '/components/modal.js';
 import { attachOverlay } from '/utils/overlay-history.js';
@@ -35,7 +36,7 @@ import { localizeBirthdayEvent } from '/utils/birthday-event.js';
 import { googleTargetValue, caldavTargetValue, outlookTargetValue } from '/utils/sync-target.js';
 import { renderSkeletonList } from '/utils/skeleton.js';
 import { findPageFab } from '/utils/fab.js';
-import { nowFields, todayKey, zonedDateKey, zonedTimeKey } from '/utils/timezone.js';
+import { displayTimeZone, nowFields, todayKey, zonedDateKey, zonedTimeKey } from '/utils/timezone.js';
 import {
   CALENDAR_MIN_TIMED_MINUTES,
   CALENDAR_SNAP_MINUTES,
@@ -589,6 +590,7 @@ let state = {
   today:         '',
   cursor:        null,     // aktuell angezeigte Referenz-Datum (YYYY-MM-DD)
   events:        [],
+  panelTasks:    [],
   tasks:         [],       // Aufgaben mit due_date für Kalender-Anzeige
   scheduleEntries: [],
   scheduleWarnings: [],
@@ -1210,7 +1212,7 @@ function holidaysOnDay(dateStr) {
  *  icon-frei, Woche/Tag/Agenda behalten es als Termin/Aufgabe-Unterscheidung. */
 function renderTaskChip(task, { interactive = true, icon = true } = {}) {
   const priority = task.priority || 'none';
-  const label    = esc(task.title);
+  const label    = esc(t('calendar.taskDeadline', { title: task.title }));
   const timeStr  = task.due_time ? ` · ${task.due_time.slice(0, 5)}` : '';
   const button   = interactive
     ? ` role="button" tabindex="0" aria-label="${esc(t('calendar.taskChipAriaLabel', { title: task.title }))}"`
@@ -1260,16 +1262,17 @@ async function loadRange(from, to) {
   const selection = { view: state.view, cursor: state.cursor, from, to };
   await calendarLoads.run(
     async () => {
-      const [evRes, taskRes, holRes, scheduleRes] = await Promise.all([
+      const [evRes, taskRes, holRes, scheduleRes, panelRes] = await Promise.all([
         api.get(calPath),
         api.get("/tasks?include_future=1").catch((err) => { console.warn("[Calendar] Tasks fetch failed:", err); return { data: [] }; }),
         api.get(`/calendar/holidays?from=${from}&to=${to}`).catch(() => ({ data: [] })),
         scheduleEnabled()
           ? api.get(`/schedule/entries?from=${from}&to=${to}`).catch(() => ({ data: { entries: [] } }))
           : Promise.resolve({ data: { entries: [] } }),
+        api.get('/tasks/plannable').catch(() => ({ data: [] })),
       ]);
       const offlineSince = navigator.onLine ? null : await getCachedAt(calPath);
-      return { evRes, taskRes, holRes, scheduleRes, offlineSince };
+      return { evRes, taskRes, holRes, scheduleRes, panelRes, offlineSince };
     },
     {
       isCurrent: () => {
@@ -1279,10 +1282,11 @@ async function loadRange(from, to) {
           && selected.from === selection.from
           && selected.to === selection.to;
       },
-      apply: ({ evRes, taskRes, holRes, scheduleRes, offlineSince }) => {
+      apply: ({ evRes, taskRes, holRes, scheduleRes, panelRes, offlineSince }) => {
         state.loadError = null;
         state.events = (evRes.data ?? []).map(localizeBirthdayEvent);
         applyPendingCalendarDeleteOverlay(state, { freshEvents: true });
+        state.panelTasks = panelRes.data ?? [];
         state.tasks = filterTasksForCalendar(taskRes.data ?? []);
         state.holidays = holRes.data ?? [];
         state.scheduleEntries = scheduleRes.data?.entries ?? [];
@@ -1446,7 +1450,10 @@ export async function render(container, { user }) {
   container.insertAdjacentHTML('beforeend', `
     <div class="calendar-page app-page app-page--full" id="calendar-page" data-composition="full">
       <div class="page-toolbar page-toolbar--wrap cal-toolbar" id="cal-toolbar"></div>
-      <div id="cal-body" style="flex:1;display:flex;flex-direction:column;overflow:hidden;"></div>
+      <div class="calendar-workspace">
+        <div id="cal-body" style="flex:1;display:flex;flex-direction:column;overflow:hidden;"></div>
+        <aside class="calendar-task-panel page-scrollport" id="calendar-task-panel" hidden></aside>
+      </div>
       <button class="page-fab" id="fab-new-event" aria-label="${t('calendar.newEvent')}" data-dock-label="${t('newLabel.calendar')}">
         <i data-lucide="plus" class="icon-xl" aria-hidden="true"></i>
       </button>
@@ -1980,7 +1987,7 @@ function ensureCalendarGestureListeners() {
     if (event.button !== 0 || event.pointerType === 'touch') return;
     const element = calendarEventElement(event.target);
     const source = eventFromElement(element);
-    if (!element || !source || state.view === 'agenda') return;
+    if (!element || !source || source.task_id || state.view === 'agenda') return;
 
     const handle = event.target.closest?.('[data-resize-edge]');
     const action = handle ? 'resize' : 'move';
@@ -2506,6 +2513,7 @@ function recurringEditChoice(event) {
 function renderView() {
   const body = _container.querySelector('#cal-body');
   if (!body) return;
+  renderTaskPanel();
   /* Das Lesemass der Seite folgt der ANSICHT, denn hier wechselt der Koerper
    * seine Natur: die Agenda ist eine Zeilenliste und will die Lesebahn, das
    * Monatsgitter ist eine Flaeche und will die ganze Content-Spalte. Ein
@@ -2718,7 +2726,7 @@ function renderMonthDay(date, inMonth) {
   const evHtml = evShown.map((ev) => `
     <div class="month-day__event"
          data-id="${ev.id}"
-         data-calendar-direct-event
+         ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
          style="${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}"
     >${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span><span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
@@ -2951,7 +2959,7 @@ function renderWeekView(container) {
             `).join('')}
             ${scheduleChips[i].map((entry) => renderScheduleChip(entry)).join('')}
             ${alldayEvs[i].map((ev) => `
-              <div class="allday-event" data-id="${ev.id}" data-calendar-direct-event
+              <div class="allday-event" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
                    style="${eventSurfaceStyle(ev)}"
                    title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
             `).join('')}
@@ -3020,6 +3028,7 @@ function renderWeekView(container) {
     }
   });
 
+  bindTaskSessionDrops(container);
   // Scrollen zu aktueller Zeit
   scrollToHour(container.querySelector('#week-scroll'), container.querySelector('.week-view__body'));
 }
@@ -3044,7 +3053,7 @@ function renderWeekEvent(ev, layout = null) {
   const width = layout ? `calc(${100 / layout.totalCols}% - 4px)` : 'auto';
 
   return `
-    <div class="week-event" data-id="${ev.id}" data-calendar-direct-event
+    <div class="week-event" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${chipAssigneeTitleSuffix(ev)}">
       ${renderEventAssigneeBar(ev)}
@@ -3215,7 +3224,7 @@ function renderDayView(container) {
           `).join('')}
           ${scheduleChips.map((entry) => renderScheduleChip(entry)).join('')}
           ${allday.map((ev) => `
-            <div class="allday-event" data-id="${ev.id}" data-calendar-direct-event
+            <div class="allday-event" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
                  style="${eventSurfaceStyle(ev)}"
                  title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>`).join('')}
           ${tasksOnDay(state.cursor).map(renderTaskChip).join('')}
@@ -3272,6 +3281,7 @@ function renderDayView(container) {
     openEventModal({ mode: 'create', date: state.cursor, time });
   });
 
+  bindTaskSessionDrops(container);
   scrollToHour(container.querySelector('#day-scroll'), container.querySelector('.day-view__body'));
 }
 
@@ -3305,7 +3315,7 @@ function renderDayEvent(ev, layout = null) {
   const timeText = `${formatTime(ev.start_datetime)}${ev.end_datetime ? '–' + formatTime(ev.end_datetime) : ''}`;
 
   return `
-    <div class="day-event${roomy ? '' : ' day-event--tight'}" data-id="${ev.id}" data-calendar-direct-event
+    <div class="day-event${roomy ? '' : ' day-event--tight'}" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.location ? ' · ' + esc(fmtLocation(ev.location)) : ''}${chipAssigneeTitleSuffix(ev)}">
       ${renderEventAssigneeBar(ev)}
@@ -4133,6 +4143,7 @@ function renderEventDetail(ev, reminders = []) {
  * Suchtreffer) wird daraus ein Sheet, mit Anker am Desktop ein Popover.
  */
 async function openEventDetail(ev, anchor = null) {
+  if (ev?.task_id) return openTaskFromCalendar(ev.task_id);
   // Haushaltshilfe-Besuche werden in ihrem eigenen Modul bearbeitet; der Umweg
   // über eine Detailansicht führte sonst ins Leere.
   if (ev?.housekeeping_visit_id) {
@@ -5825,4 +5836,55 @@ async function deleteSingleOccurrence(event) {
     ),
     render: renderView,
   });
+}
+
+
+/** The first task panel deliberately keeps scheduled tasks available. */
+function renderTaskPanel() {
+  const panel = _container.querySelector('#calendar-task-panel');
+  if (!panel) return;
+  const enabled = moduleAccess('tasks') === 'write' && moduleAccess('calendar') === 'write';
+  panel.hidden = !enabled;
+  if (!enabled) return;
+  panel.replaceChildren();
+  panel.insertAdjacentHTML('beforeend', `<h2 class="calendar-task-panel__title">${esc(t('calendar.taskPanel'))}</h2>
+    <p class="calendar-task-panel__hint">${esc(t('calendar.taskDragHint'))}</p>
+    ${state.panelTasks.map(task => `<button type="button" class="calendar-task-card" draggable="true" data-plannable-task-id="${task.id}">
+      <i data-lucide="check-square" class="icon-sm" aria-hidden="true"></i><span>${esc(task.title)}</span>
+    </button>`).join('') || `<p class="calendar-task-panel__hint">${esc(t('tasks.emptyTitle'))}</p>`}`);
+  panel.ondragstart = event => {
+    const card = event.target.closest('[data-plannable-task-id]');
+    if (!card || !window.matchMedia('(min-width: 1024px)').matches) { event.preventDefault(); return; }
+    event.dataTransfer.setData('application/x-yuvomi-task', card.dataset.plannableTaskId);
+    event.dataTransfer.effectAllowed = 'copy';
+  };
+  // Replacing cards resets their click listeners, keeping rerenders independent.
+  for (const card of panel.querySelectorAll('[data-plannable-task-id]')) {
+    card.addEventListener('click', () => openTaskFromCalendar(card.dataset.plannableTaskId));
+  }
+}
+
+function bindTaskSessionDrops(container) {
+  for (const col of container.querySelectorAll('.week-view__col, .day-view__col')) {
+    col.addEventListener('dragover', event => {
+      if (!event.dataTransfer.types.includes('application/x-yuvomi-task') || !window.matchMedia('(min-width: 1024px)').matches) return;
+      event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
+      col.classList.add('is-task-drop-target');
+    });
+    col.addEventListener('dragleave', () => col.classList.remove('is-task-drop-target'));
+    col.addEventListener('drop', async event => {
+      col.classList.remove('is-task-drop-target');
+      const taskId = event.dataTransfer.getData('application/x-yuvomi-task');
+      if (!/^\d+$/.test(taskId) || !window.matchMedia('(min-width: 1024px)').matches) return;
+      event.preventDefault(); event.stopPropagation();
+      try {
+        await api.post(`/tasks/${taskId}/sessions`, {
+          start_datetime: `${col.dataset.date}T${clickedTime(event, col)}`,
+          ...(displayTimeZone() ? { tzid: displayTimeZone() } : {}),
+        });
+        await loadRange(state.rangeFrom, state.rangeTo);
+        renderView();
+      } catch (error) { window.yuvomi?.showToast(error.data?.error || error.message, 'danger'); }
+    });
+  }
 }

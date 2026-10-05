@@ -142,6 +142,7 @@ export function runSearch(database, q, userId, { hiddenModules = null } = {}) {
         )
       )
       AND ${visibilityWhere('e', 'event_assignments', 'event_id', '@userId')}
+      ${hiddenModules?.has('tasks') ? 'AND e.task_id IS NULL' : ''}
     ORDER BY e.start_datetime ASC
     LIMIT @limit
   `).all({ match, userId, limit });

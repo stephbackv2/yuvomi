@@ -2251,3 +2251,18 @@
 .calendar-sync-status--error {
   color: var(--color-danger);
 }
+
+
+/* Calendar and basic desktop task source share the available page height. */
+.calendar-workspace { display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.calendar-workspace > #cal-body { min-width: 0; }
+.calendar-task-panel { display: none; }
+@media (min-width: 1024px) {
+  .calendar-task-panel:not([hidden]) { display: block; width: var(--sidebar-width-expanded); flex: 0 0 var(--sidebar-width-expanded); padding: var(--space-4); border-inline-start: var(--space-px) solid var(--color-border); overflow-y: auto; }
+}
+.calendar-task-panel__title { font-size: var(--text-base); margin: 0 0 var(--space-2); }
+.calendar-task-panel__hint { font-size: var(--text-sm); color: var(--color-text-secondary); margin-bottom: var(--space-3); }
+.calendar-task-card { display: flex; gap: var(--space-2); align-items: center; width: 100%; padding: var(--space-3); margin-bottom: var(--space-2); border: var(--space-px) solid var(--color-border); border-radius: var(--radius-full); color: var(--color-text-primary); background: var(--color-surface-work); text-align: start; cursor: grab; }
+.calendar-task-card:active { cursor: grabbing; }
+.is-task-drop-target { outline: var(--space-0h) solid var(--color-accent); outline-offset: calc(-1 * var(--space-0h)); }
+[data-task-session] .calendar-resize-handle { display: none; }

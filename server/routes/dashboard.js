@@ -217,7 +217,7 @@ router.get('/', (req, res) => {
   // sodass auch Termine erscheinen, deren Master-Start in der Vergangenheit liegt.
   if (allows('calendar')) try {
     result.upcomingEvents = getUpcomingEvents(d, {
-      userId, limit: 5, fromToday: true, assignedTo: eventsAssignedTo, includeBirthdays,
+      userId, limit: 5, fromToday: true, assignedTo: eventsAssignedTo, includeBirthdays, includeTaskSessions: allows('tasks'),
     })
       .map(({ assigned_users_json, ...event }) => {
         event.assigned_users = assigned_users_json ? JSON.parse(assigned_users_json) : [];

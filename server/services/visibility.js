@@ -30,6 +30,19 @@ export function normalizeVisibility(value, fallback = 'all') {
  * @returns {string} SQL-Fragment (ohne führendes AND)
  */
 export function visibilityWhere(alias, assignTable, assignCol, bind = '?') {
+  // Allocations retain historical participant snapshots, but permission always
+  // comes from the current parent. Keep exactly two positional actor bindings.
+  if (assignTable === 'event_assignments') {
+    const parent = field => `(SELECT st.${field} FROM tasks st WHERE st.id = ${alias}.task_id)`;
+    const visibility = `COALESCE(${parent('visibility')}, ${alias}.visibility)`;
+    const creator = `COALESCE(${parent('created_by')}, ${alias}.created_by)`;
+    return `(${visibility} = 'all' OR ${creator} = ${bind}
+      OR (${visibility} = 'assignees' AND EXISTS (
+        SELECT 1 FROM (
+          SELECT ea.user_id FROM event_assignments ea WHERE ea.event_id = ${alias}.id AND ${alias}.task_id IS NULL
+          UNION ALL SELECT ta.user_id FROM task_assignments ta WHERE ta.task_id = ${alias}.task_id
+        ) vx WHERE vx.user_id = ${bind})))`;
+  }
   return `(
     ${alias}.visibility = 'all'
     OR ${alias}.created_by = ${bind}

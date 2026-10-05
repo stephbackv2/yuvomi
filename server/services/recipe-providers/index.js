@@ -12,7 +12,10 @@
  *                                                           überlebt Umbenennungen)
  *                                                     ref = Schlüssel für den Detail-Abruf via getRecipe()
  *          async getRecipe(ref)                   -> { id, updatedAt, slug, title, notes, hasImage,
- *                                                       ingredients: [{ name, quantity, category }] }
+ *                                                       ingredients: [{ name, quantity, category }],
+ *                                                       instructions: string[], instructionsAvailable: boolean }
+ *                                                     Missing instruction fields set instructionsAvailable=false
+ *                                                     to preserve previous cooking content.
  *                                                     slug: opak, adapterdefiniert, wird in
  *                                                     recipes.provider_slug persistiert, damit
  *                                                     recipeUrl()/fetchThumbnail() ohne erneuten

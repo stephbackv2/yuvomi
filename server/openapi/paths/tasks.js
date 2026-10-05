@@ -2,6 +2,18 @@ import { op, jsonBody, idParam, stringPathParam } from '../helpers.js';
 
 export function tasksPaths() {
   return {
+    '/api/v1/tasks/plannable': {
+      get: op({ summary: 'List tasks available for scheduling', tag: 'Tasks', description: 'Visible unfinished, unarchived parent tasks assigned to the caller or unassigned, with their start-date eligibility applied. Tasks remain available after allocations. Requires task and calendar read access.' }),
+    },
+    '/api/v1/tasks/{id}/sessions': {
+      get: op({ summary: 'Read task work allocations', tag: 'Tasks', params: [idParam()], description: 'Durable calendar event representations, ordered by start and identity. Uses current parent-task visibility and requires task and calendar read access.' }),
+      post: op({ summary: 'Schedule local task work', tag: 'Tasks', params: [idParam()], stateChanging: true,
+        requestBody: jsonBody('#/components/schemas/TaskSessionCreate'),
+        description: 'Requires task and calendar write access. Allocates only the existing unfinished parent instance. Inherits its explicit primary and additional assignees; an unassigned task is assigned to the caller atomically. End defaults to 30 minutes after start. Stores UTC instants with the supplied IANA zone (household zone by default). Preserves deadline and appearance date. Returns a linked calendar event with unfinished state and inherited assignments. No recurrence or external publication is created. Invalid intervals/participants return 400; missing or invisible tasks return 404; unschedulable tasks return 409.',
+        responses: { 201: { description: 'Created allocation', content: { 'application/json': { schema: { $ref: '#/components/schemas/CalendarEventResponse' } } } },
+          400: { description: 'Invalid interval or participants' }, 401: { $ref: '#/components/responses/Unauthorized' }, 403: { description: 'Task and calendar write access required' }, 404: { description: 'Task not found' }, 409: { description: 'Task is not schedulable' } },
+      }),
+    },
     '/api/v1/tasks': {
       // Die Filter stehen als echte Parameter da, nicht nur im Fließtext: ein
       // generierter Client und die MCP-Brücke (get_api_operation) lesen die

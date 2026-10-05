@@ -143,6 +143,7 @@ function generatedDefinitionHash(taskId) {
     assignments: db.get().prepare('SELECT user_id FROM task_assignments WHERE task_id = ? ORDER BY user_id')
       .all(task.id).map((row) => row.user_id),
     tags: loadTags(db.get(), task.id).sort(),
+    sessions: db.get().prepare('SELECT id FROM calendar_events WHERE task_id = ? ORDER BY id').all(task.id).map(row => row.id),
     documents: db.get().prepare('SELECT document_id FROM task_documents WHERE task_id = ? ORDER BY document_id')
       .all(task.id).map((row) => row.document_id),
     comments: db.get().prepare('SELECT id, user_id, comment FROM task_comments WHERE task_id = ? ORDER BY id').all(task.id),

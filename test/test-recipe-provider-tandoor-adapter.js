@@ -234,6 +234,21 @@ test('getRecipe: null-Menge bei no_amount=true oder falsy amount', async () => {
   assert.equal(byName.Oil, '2 tbsp');
 });
 
+test('getRecipe: cooking steps follow provider order and preserve headings and notes', async () => {
+  mockHandler((_req, res) => sendJson(res, {
+    id: 42, name: 'Bread', updated_at: 't1', description: 'Family notes',
+    steps: [
+      { order: 2, instruction: 'Bake until golden.', ingredients: [] },
+      { order: 0, name: 'Dough', show_as_header: true, instruction: '', ingredients: [] },
+      { order: 1, instruction: '  Mix flour.  ', ingredients: [{ food: { name: 'Flour' }, amount: 200, unit: { name: 'g' } }] },
+    ],
+  }));
+  const recipe = await new TandoorAdapter(account).getRecipe('42');
+  assert.deepEqual(recipe.instructions, ['Dough', 'Mix flour.', 'Bake until golden.']);
+  assert.equal(recipe.notes, 'Family notes');
+  assert.equal(recipe.ingredients[0].quantity, '200 g');
+});
+
 test('getRecipe: HTTP-Fehler wirft mit Statuscode', async () => {
   mockHandler((req, res) => sendJson(res, {}, 404));
   const adapter = new TandoorAdapter(account);

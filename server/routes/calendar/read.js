@@ -95,6 +95,7 @@ router.get('/', (req, res) => {
       params.push(req.query.source);
     }
 
+    if (!res.locals.taskSessionsReadable) sql += ' AND e.task_id IS NULL';
     sql += ' ORDER BY e.start_datetime ASC, e.all_day DESC';
 
     const rawEvents  = db.get().prepare(sql).all(...params);
@@ -118,7 +119,7 @@ router.get('/', (req, res) => {
 router.get('/upcoming', (req, res) => {
   try {
     const limit    = Math.min(parseInt(req.query.limit, 10) || 5, 20);
-    const expanded = getUpcomingEvents(db.get(), { userId: getUserId(req), limit })
+    const expanded = getUpcomingEvents(db.get(), { userId: getUserId(req), limit, includeTaskSessions: res.locals.taskSessionsReadable })
       .map((event) => serializeEvent(event, db.get()));
 
     res.json({ data: expanded });
@@ -154,7 +155,8 @@ router.get('/search', (req, res) => {
           SELECT id FROM ics_subscriptions WHERE shared = 1 OR created_by = @userId
         )
       )
-      AND ${visibilityWhere('e', 'event_assignments', 'event_id', '@userId')}`;
+      AND ${visibilityWhere('e', 'event_assignments', 'event_id', '@userId')}
+      ${res.locals.taskSessionsReadable ? '' : 'AND e.task_id IS NULL'}`;
 
     const total = db.get().prepare(`
       SELECT COUNT(*) AS n

@@ -33,7 +33,7 @@ function withSource(recipe) {
   // Rezeptliste ein Vielfaches ihrer selbst - fuer eine Vorschau von 32 Pixeln,
   // die ohnehin ueber `GET /recipes/:id/image` kommt. Uebrig bleibt das Flag,
   // das die Oberflaeche wirklich braucht: gibt es eins?
-  const { image_data, ...rest } = recipe;
+  const { image_data, provider_instructions_version, ...rest } = recipe;
   return {
     ...rest,
     instructions: JSON.parse(recipe.instructions || '[]'),
