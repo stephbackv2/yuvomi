@@ -1871,7 +1871,11 @@
     box-shadow: inset 0 0 0 var(--space-px) var(--color-surface-work);
   }
 
-  .month-view:not(.month-view--titles) .month-day__event > *,
+  .month-view:not(.month-view--titles) .event-assignees {
+    height: var(--space-0h);
+  }
+
+  .month-view:not(.month-view--titles) .month-day__event > :not(.event-assignees),
   .month-view:not(.month-view--titles) .cal-task-chip > *,
   .month-view:not(.month-view--titles) .month-day__holiday > * {
     display: none;

@@ -1150,8 +1150,9 @@ function renderCountdowns(allItems, size, total = null) {
     // Die Farbe des Termins trägt die Zeile als schmale Marke - dieselbe
     // Zuordnung, die er im Kalender hat. Eine Aufgabe hat keine, sie bekommt
     // den Modulton.
-    const accent = c.color
-      ? ` style="--countdown-accent:${esc(c.color)}"`
+    const color = c.source === 'event' ? resolveEventColor(c) : c.color;
+    const accent = color
+      ? ` style="--countdown-accent:${esc(color)}"`
       : ` style="--countdown-accent:var(--module-${c.source === 'task' ? 'tasks' : 'calendar'}, var(--color-accent))"`;
     /* DIE ZEILE TRIFFT IHR OBJEKT, nicht sein Modul - wie jede andere Zeile des
      * Dashboards. Sie führte auf `/tasks` bzw. `/calendar`, und damit landete
@@ -2221,7 +2222,7 @@ function renderTodayRow(row) {
       ${time}
       ${row.event ? renderAvatarStack(row.event.assigned_users ?? [], { size: 20 }) : ''}
   `;
-  const attrs = `class="today-cockpit-card today-cockpit-card--${row.tone}" data-route="${esc(row.route)}"${objectAttrs}${row.event ? ` style="--seal-accent:${esc(resolveEventColor(row.event))}"` : ''}`;
+  const attrs = `class="today-cockpit-card today-cockpit-card--${row.tone}" data-route="${esc(row.route)}"${objectAttrs}${row.event ? ` style="--today-card-accent:${esc(resolveEventColor(row.event))}"` : ''}`;
   return opensModal
     ? `<button type="button" ${attrs}>${inner}</button>`
     : `<a href="${esc(row.route)}" ${attrs}>${inner}</a>`;

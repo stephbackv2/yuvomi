@@ -12,7 +12,6 @@ export function openRecipeReader(recipe, { meal = null } = {}) {
   openModal({
     title: recipe.title,
     size: 'lg',
-    initialFocus: 'heading',
     content: `<article class="recipe-reader">
       ${recipe.has_own_image || recipe.provider_has_image ? recipeThumbHtml({
         recipeId: recipe.id, hasOwnImage: recipe.has_own_image,

@@ -28,6 +28,7 @@ import {
   removeTagEverywhere, renameTag, setTags, tagKey, tagsKey, taskIdsWithTag,
 } from '../utils/task-tags.js';
 import * as v from '../middleware/validate.js';
+import { setAssignments } from '../utils/task-assignments.js';
 
 const log = createLogger('Tasks');
 
@@ -219,12 +220,6 @@ function parseAssignedTo(val) {
   if (Array.isArray(val)) return val.map(Number).filter(Boolean);
   if (val !== null && val !== undefined && val !== '') return [Number(val)].filter(Boolean);
   return [];
-}
-
-function setAssignments(d, taskId, userIds) {
-  d.prepare('DELETE FROM task_assignments WHERE task_id = ?').run(taskId);
-  const ins = d.prepare('INSERT OR IGNORE INTO task_assignments (task_id, user_id) VALUES (?, ?)');
-  for (const uid of userIds) ins.run(taskId, uid);
 }
 
 /** Alle Subtasks einer Aufgabe laden (eine Ebene tief). */

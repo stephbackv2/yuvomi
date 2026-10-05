@@ -2867,11 +2867,11 @@
         "importSelected": "{{count}} kontak ang napili"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Mga tagubilin sa pagluluto",
+        "instructionsPlaceholder": "Isang hakbang sa pagluluto bawat linya",
+        "originalQuantities": "Orihinal na dami sa resipe",
+        "plannedQuantities": "Dami para sa nakaplanong pagkain",
+        "fullRecipe": "Buksan ang buong pahina ng resipe",
         "mealTypeNone": "Walang pagkain",
         "toShoppingSuccess_few": "{{count}} sangkap ang naidagdag sa {{list}}.",
         "planSuccess": "Nakaplano ang {{name}} para sa {{date}}.",

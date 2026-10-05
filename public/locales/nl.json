@@ -2855,11 +2855,11 @@
         "importSelected": "{{count}} contacten geselecteerd"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Bereidingsinstructies",
+        "instructionsPlaceholder": "Eén bereidingsstap per regel",
+        "originalQuantities": "Oorspronkelijke recepthoeveelheden",
+        "plannedQuantities": "Hoeveelheden voor de geplande maaltijd",
+        "fullRecipe": "Volledig recept openen",
         "mealTypeNone": "Geen maaltijd",
         "toShoppingSuccess_few": "{{count}} ingrediënten toegevoegd aan {{list}}.",
         "planSuccess": "{{name}} gepland voor {{date}}.",

@@ -1086,6 +1086,35 @@ test('reopening preserves a generated successor after its definition is edited',
 });
 
 
+test('reopening preserves generated successors with documents, comments or a chosen sync target', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  for (const change of ['document', 'comment', 'sync']) {
+    const created = await call('POST', '/', { as: admin, body: {
+      title: `Preserve successor ${change}`, status: 'done',
+      is_recurring: true, recurrence_rule: 'FREQ=WEEKLY', due_date: '2090-01-01',
+    } });
+    const id = created.body.data.id;
+    const list = await call('GET', '/?include_future=1', { as: admin });
+    const successor = list.body.data.find((task) => task.recurrence_origin_id === id && !task.parent_task_id);
+    assert.ok(successor);
+    if (change === 'document') {
+      const documentId = Number(db.prepare(`INSERT INTO family_documents
+        (name, original_name, mime_type, file_size, content_data, created_by)
+        VALUES ('Successor instructions', 'instructions.txt', 'text/plain', 1, 'a', ?)`)
+        .run(ALICE).lastInsertRowid);
+      assert.equal((await call('PUT', `/${successor.id}/documents`, { as: admin, body: { document_ids: [documentId] } })).status, 200);
+    } else if (change === 'comment') {
+      assert.equal((await call('POST', `/${successor.id}/comments`, { as: admin, body: { comment: 'Please keep these instructions' } })).status, 201);
+    } else {
+      const { accountId, url } = seedReminderList();
+      assert.equal((await call('PUT', `/${successor.id}`, { as: admin, body: { sync_target: `caldav:${accountId}|${url}` } })).status, 200);
+    }
+    assert.equal((await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'open' } })).status, 200);
+    assert.equal((await call('GET', `/${successor.id}`, { as: admin })).status, 200);
+    if (change === 'document') assert.equal((await call('GET', `/${successor.id}/documents`, { as: admin })).body.data.length, 1);
+  }
+});
+
 test('status commands cannot change a task hidden from the actor', async () => {
   const created = await call('POST', '/', { as: { id: ALICE, role: 'admin' }, body: { title: 'Private transition', visibility: 'private' } });
   const result = await call('PATCH', `/${created.body.data.id}/status`, { as: { id: BOB, role: 'member' }, body: { status: 'done' } });

@@ -2764,11 +2764,11 @@
         "intervalHint": "Depois de escolher, o intervalo fica livre - por exemplo, a cada 2 semanas ou a cada 3 meses."
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Instruções de preparo",
+        "instructionsPlaceholder": "Uma etapa de preparo por linha",
+        "originalQuantities": "Quantidades originais da receita",
+        "plannedQuantities": "Quantidades da refeição planejada",
+        "fullRecipe": "Abrir a receita completa",
         "mealTypeNone": "Sem refeição",
         "toShoppingSuccess_few": "{{count}} ingredientes adicionados a {{list}}.",
         "planSuccess": "{{name}} planeado para {{date}}.",

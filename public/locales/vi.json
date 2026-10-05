@@ -2855,11 +2855,11 @@
         "importSelected": "Đã chọn {{count}} liên hệ"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Hướng dẫn nấu ăn",
+        "instructionsPlaceholder": "Mỗi dòng một bước nấu ăn",
+        "originalQuantities": "Lượng nguyên liệu gốc của công thức",
+        "plannedQuantities": "Lượng nguyên liệu cho bữa ăn đã lên kế hoạch",
+        "fullRecipe": "Mở trang công thức đầy đủ",
         "mealTypeNone": "Không có bữa ăn",
         "toShoppingSuccess_few": "Đã thêm {{count}} nguyên liệu vào {{list}}.",
         "planSuccess": "Đã lên kế hoạch {{name}} cho {{date}}.",

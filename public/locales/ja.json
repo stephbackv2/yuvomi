@@ -2764,11 +2764,11 @@
         "intervalHint": "選択したあとで間隔を自由に設定できます。2週間ごと、3ヶ月ごとなど。"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "調理手順",
+        "instructionsPlaceholder": "1行に1つの調理手順",
+        "originalQuantities": "レシピの元の分量",
+        "plannedQuantities": "予定した食事の分量",
+        "fullRecipe": "レシピの全ページを開く",
         "mealTypeNone": "食事なし",
         "toShoppingSuccess_few": "{{list}} に {{count}} 件の材料を追加しました。",
         "planSuccess": "{{name}} を {{date}} に計画しました。",

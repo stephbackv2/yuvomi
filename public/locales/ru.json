@@ -2764,11 +2764,11 @@
         "intervalHint": "После выбора интервал настраивается свободно - например, каждые 2 недели или каждые 3 месяца."
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Инструкции по приготовлению",
+        "instructionsPlaceholder": "Один шаг приготовления в каждой строке",
+        "originalQuantities": "Исходные количества из рецепта",
+        "plannedQuantities": "Количество для запланированного блюда",
+        "fullRecipe": "Открыть полную страницу рецепта",
         "mealTypeNone": "Без приёма пищи",
         "toShoppingSuccess_few": "В {{list}} добавлено {{count}} ингредиента.",
         "planSuccess": "«{{name}}» запланировано на {{date}}.",

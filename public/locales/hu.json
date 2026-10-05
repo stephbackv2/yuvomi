@@ -2855,11 +2855,11 @@
         "importSelected": "{{count}} névjegy kiválasztva"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Elkészítési útmutató",
+        "instructionsPlaceholder": "Soronként egy elkészítési lépés",
+        "originalQuantities": "A recept eredeti mennyiségei",
+        "plannedQuantities": "A tervezett étkezés mennyiségei",
+        "fullRecipe": "Teljes recept megnyitása",
         "mealTypeNone": "Nincs étkezés",
         "toShoppingSuccess_few": "{{count}} hozzávaló hozzáadva a következőhöz: {{list}}.",
         "planSuccess": "{{name}} betervezve {{date}}-ra.",

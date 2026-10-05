@@ -41,6 +41,8 @@ const SHARED_ISOMORPHIC = new Set([
   // genau dem Wert, den jemand sucht, der sie auseinanderlaufen sehen will.
   'public/utils/quick-link-url.js',
   'public/utils/recipe-meal-types.js',
+  // Recipe instruction/ingredient normalization is pure and shared by URL imports.
+  'public/utils/recipe-import.js',
   'public/utils/contact-name.js',
   'public/utils/pantry-units.js',
   // #1074: Ziffern fremder Systeme nach ASCII. Client und Server lesen dieselben

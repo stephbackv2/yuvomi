@@ -2764,11 +2764,11 @@
         "intervalHint": "بعد الاختيار يمكنك ضبط الفاصل الزمني بحرية، مثل كل أسبوعين أو كل 3 أشهر."
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "تعليمات الطهي",
+        "instructionsPlaceholder": "خطوة طهي واحدة في كل سطر",
+        "originalQuantities": "كميات الوصفة الأصلية",
+        "plannedQuantities": "كميات الوجبة المخطط لها",
+        "fullRecipe": "فتح صفحة الوصفة الكاملة",
         "mealTypeNone": "بدون وجبة",
         "toShoppingSuccess_few": "تمت إضافة {{count}} مكونات إلى {{list}}.",
         "planSuccess": "تم تخطيط {{name}} ليوم {{date}}.",

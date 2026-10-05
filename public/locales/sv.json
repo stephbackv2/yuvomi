@@ -2764,11 +2764,11 @@
         "intervalHint": "Efter valet kan intervallet ställas in fritt - till exempel varannan vecka eller var tredje månad."
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Tillagningsinstruktioner",
+        "instructionsPlaceholder": "Ett tillagningssteg per rad",
+        "originalQuantities": "Receptets ursprungliga mängder",
+        "plannedQuantities": "Mängder för den planerade måltiden",
+        "fullRecipe": "Öppna hela receptet",
         "mealTypeNone": "Ingen måltid",
         "toShoppingSuccess_few": "{{count}} ingredienser tillagda i {{list}}.",
         "planSuccess": "{{name}} planerad till {{date}}.",

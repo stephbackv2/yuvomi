@@ -2867,11 +2867,11 @@
         "importSelected": "{{count}} kontak dipilih"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Petunjuk memasak",
+        "instructionsPlaceholder": "Satu langkah memasak per baris",
+        "originalQuantities": "Takaran asli resep",
+        "plannedQuantities": "Takaran hidangan yang direncanakan",
+        "fullRecipe": "Buka halaman resep lengkap",
         "mealTypeNone": "Tanpa waktu makan",
         "toShoppingSuccess_few": "{{count}} bahan ditambahkan ke {{list}}.",
         "planSuccess": "{{name}} direncanakan untuk {{date}}.",

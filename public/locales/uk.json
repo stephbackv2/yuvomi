@@ -2799,11 +2799,11 @@
         "sharedWithAssignees": "Ті, кому призначено цю подію, також отримають це нагадування."
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Інструкції з приготування",
+        "instructionsPlaceholder": "Один крок приготування в кожному рядку",
+        "originalQuantities": "Початкові кількості з рецепта",
+        "plannedQuantities": "Кількості для запланованої страви",
+        "fullRecipe": "Відкрити повну сторінку рецепта",
         "mealTypeNone": "Без прийому їжі",
         "toShoppingSuccess_few": "До {{list}} додано {{count}} інгредієнти.",
         "planSuccess": "«{{name}}» заплановано на {{date}}.",

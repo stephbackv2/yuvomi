@@ -3479,11 +3479,11 @@
         "intervalHint": "Po výběru lze interval libovolně nastavit - třeba každé 2 týdny nebo každé 3 měsíce."
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "Postup přípravy",
+        "instructionsPlaceholder": "Jeden krok přípravy na řádek",
+        "originalQuantities": "Původní množství v receptu",
+        "plannedQuantities": "Množství plánovaného jídla",
+        "fullRecipe": "Otevřít celý recept",
         "mealTypeNone": "Žádné jídlo",
         "toShoppingSuccess_few": "{{count}} ingredience přidány do {{list}}.",
         "planSuccess": "{{name}} naplánováno na {{date}}.",

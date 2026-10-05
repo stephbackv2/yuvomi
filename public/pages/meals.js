@@ -1021,6 +1021,7 @@ function wireDragDrop(grid) {
   let dragging = null; // { mealId, sourceDate, sourceType, ghost, startX, startY }
 
   grid.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !e.isPrimary || dragging) return;
     const card = e.target.closest('.meal-card');
     if (!card) return;
     // Die Aktionsleiste ist kein Drag-Griff. Hier standen drei Aktionen
@@ -1037,27 +1038,28 @@ function wireDragDrop(grid) {
     const sourceDate = slot.dataset.date;
     const sourceType = slot.dataset.type;
 
-    e.preventDefault();
-    card.setPointerCapture(e.pointerId);
-
     let ghost = null;
-    if (!reducedMotion) {
-      ghost = card.cloneNode(true);
-      ghost.classList.add('meal-card--ghost');
-      ghost.style.width  = card.offsetWidth + 'px';
-      ghost.style.height = card.offsetHeight + 'px';
-      ghost.style.left   = (e.clientX - card.offsetWidth / 2) + 'px';
-      ghost.style.top    = (e.clientY - card.offsetHeight / 2) + 'px';
-      document.body.appendChild(ghost);
-    }
-
-    slot.classList.add('meal-slot--dragging');
-    dragging = { mealId, sourceDate, sourceType, ghost, card, slot };
-
     let lastTarget = null;
+    let started = false;
 
     function onMove(ev) {
-      if (!dragging) return;
+      if (ev.pointerId !== e.pointerId) return;
+      if (!started) {
+        // A press remains a normal button click until the pointer moves.
+        if (Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 6) return;
+        started = true;
+        card.setPointerCapture(e.pointerId);
+        if (!reducedMotion) {
+          ghost = card.cloneNode(true);
+          ghost.classList.add('meal-card--ghost');
+          ghost.style.width = card.offsetWidth + 'px';
+          ghost.style.height = card.offsetHeight + 'px';
+          document.body.appendChild(ghost);
+        }
+        slot.classList.add('meal-slot--dragging');
+        dragging = { mealId, sourceDate, sourceType, ghost, card, slot };
+      }
+      ev.preventDefault();
       if (ghost) {
         ghost.style.left = (ev.clientX - ghost.offsetWidth / 2) + 'px';
         ghost.style.top  = (ev.clientY - ghost.offsetHeight / 2) + 'px';
@@ -1077,39 +1079,37 @@ function wireDragDrop(grid) {
     }
 
     async function onUp(ev) {
-      if (!dragging) return;
-      const { mealId, sourceDate, sourceType, slot: sourceSlot } = dragging;
-      cleanup(); // setzt dragging = null - Werte daher vorher destrukturieren
-
+      if (ev.pointerId !== e.pointerId) return;
+      if (!started) { cleanup(); return; }
       if (ghost) ghost.style.display = 'none';
       const el = document.elementFromPoint(ev.clientX, ev.clientY);
-      if (ghost) ghost.style.display = '';
-
       const targetSlot = el?.closest('.meal-slot');
-      if (targetSlot && targetSlot !== sourceSlot) {
+      cleanup();
+      _suppressNextClick = true;
+      setTimeout(() => { _suppressNextClick = false; }, 300);
+      if (targetSlot && targetSlot !== slot) {
         const targetDate = targetSlot.dataset.date;
         const targetType = targetSlot.dataset.type;
-        _suppressNextClick = true;
-        setTimeout(() => { _suppressNextClick = false; }, 300);
         await moveMeal(mealId, targetDate, targetType);
       }
     }
 
-    function onCancel() { cleanup(); }
+    function onCancel(ev) { if (ev.pointerId === e.pointerId) cleanup(); }
 
     function cleanup() {
       ghost?.remove();
       dragging?.slot?.classList.remove('meal-slot--dragging');
       lastTarget?.classList.remove('meal-slot--drop-target');
       dragging = null;
-      card.removeEventListener('pointermove',   onMove);
-      card.removeEventListener('pointerup',     onUp);
-      card.removeEventListener('pointercancel', onCancel);
+      if (card.hasPointerCapture(e.pointerId)) card.releasePointerCapture(e.pointerId);
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onCancel);
     }
 
-    card.addEventListener('pointermove',   onMove);
-    card.addEventListener('pointerup',     onUp);
-    card.addEventListener('pointercancel', onCancel);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onCancel);
   });
 
   // Suppress click after a completed drag

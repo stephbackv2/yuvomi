@@ -645,6 +645,10 @@ test('recipe instructions round-trip and omitted updates preserve them', async (
   const list = await call('GET', '/');
   assert.equal(list.body.data.find((recipe) => recipe.id === id).notes, 'Legacy client');
   assert.deepEqual(list.body.data.find((recipe) => recipe.id === id).instructions, ['Mix flour.', 'Bake for 20 minutes.']);
+  const detail = await call('GET', `/${id}`);
+  assert.equal(detail.status, 200);
+  assert.deepEqual(detail.body.data.instructions, ['Mix flour.', 'Bake for 20 minutes.']);
+  assert.equal(detail.body.data.notes, 'Legacy client');
   const cleared = await call('PUT', `/${id}`, { title: 'Updated', instructions: [] });
   assert.deepEqual(cleared.body.data.instructions, []);
 });

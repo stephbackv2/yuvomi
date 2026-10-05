@@ -479,7 +479,7 @@
   border-top: 1px solid var(--color-border-subtle);
 }
 
-/* Die Titelfläche ist der Öffnen-Button der Karte (edit-meal). Sie trägt das
+/* Die Titelfläche öffnet das Rezept oder den Editor für unverknüpfte Mahlzeiten. Sie trägt das
  * obere Karten-Padding, die Aktionszeile darunter das untere - zusammen ergibt
  * das die frühere Klickfläche der Karte, nur ohne Buttons IM Button
  * (invalides HTML, Critique 2026-08-17). */

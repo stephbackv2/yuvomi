@@ -2764,11 +2764,11 @@
         "intervalHint": "चुनने के बाद अंतराल स्वतंत्र रूप से सेट किया जा सकता है, जैसे हर 2 सप्ताह या हर 3 माह।"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "पकाने के निर्देश",
+        "instructionsPlaceholder": "हर पंक्ति में पकाने का एक चरण",
+        "originalQuantities": "रेसिपी की मूल मात्राएँ",
+        "plannedQuantities": "नियोजित भोजन की मात्राएँ",
+        "fullRecipe": "पूरी रेसिपी का पृष्ठ खोलें",
         "mealTypeNone": "कोई भोजन नहीं",
         "toShoppingSuccess_few": "{{list}} में {{count}} सामग्री जोड़े गए।",
         "planSuccess": "{{name}} {{date}} के लिए तय किया गया.",

@@ -2867,11 +2867,11 @@
         "importSelected": "{{count}} مخاطب انتخاب شد"
     },
     "recipes": {
-        "instructionsLabel": "Cooking instructions",
-        "instructionsPlaceholder": "One cooking step per line",
-        "originalQuantities": "Original recipe quantities",
-        "plannedQuantities": "Planned meal quantities",
-        "fullRecipe": "Open full recipe page",
+        "instructionsLabel": "دستور پخت",
+        "instructionsPlaceholder": "هر مرحلهٔ پخت در یک خط",
+        "originalQuantities": "مقادیر اصلی دستور غذا",
+        "plannedQuantities": "مقادیر وعدهٔ برنامه‌ریزی‌شده",
+        "fullRecipe": "باز کردن صفحهٔ کامل دستور غذا",
         "mealTypeNone": "بدون وعده",
         "toShoppingSuccess_few": "{{count}} ماده به {{list}} اضافه شد.",
         "planSuccess": "{{name}} برای {{date}} برنامه‌ریزی شد.",
