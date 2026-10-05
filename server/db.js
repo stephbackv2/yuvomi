@@ -7720,6 +7720,19 @@ const MIGRATIONS = [
         ON calendar_edit_operations(status, claim_expires_at, claim_generation);
     `,
   },
+  {
+    version: 196,
+    description: 'Recipes: ordered cooking instructions independent of notes',
+    up: `ALTER TABLE recipes ADD COLUMN instructions TEXT NOT NULL DEFAULT '[]';`,
+  },
+  {
+    version: 197,
+    description: 'Tasks: protect edits to generated recurrence follow-ups',
+    up: `CREATE TABLE task_recurrence_snapshots (
+      task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+      definition_hash TEXT NOT NULL
+    );`,
+  },
 ];
 
 /**

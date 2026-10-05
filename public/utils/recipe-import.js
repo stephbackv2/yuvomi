@@ -89,14 +89,13 @@ export function parseRecipeImportJson(raw, sourceUrl) {
   }).filter((ingredient) => ingredient.name);
 
   const steps = flattenSteps(value.steps || value.instructions || value.recipeInstructions).slice(0, 100);
-  const notes = steps.length
-    ? steps.map((step, index) => `${index + 1}. ${step}`).join('\n').slice(0, MAX_NOTES)
-    : (text(value.notes).slice(0, MAX_NOTES) || null);
+  const notes = text(value.notes).slice(0, MAX_NOTES) || null;
 
   return {
     title,
     recipe_url: String(sourceUrl || value.recipe_url || value.url || '').trim() || null,
     notes,
+    instructions: steps.map((step) => step.slice(0, MAX_NOTES)),
     ingredients,
   };
 }

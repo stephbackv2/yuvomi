@@ -2764,6 +2764,11 @@
         "intervalHint": "选择之后可以自由设置间隔，例如每 2 周或每 3 个月。"
     },
     "recipes": {
+        "instructionsLabel": "Cooking instructions",
+        "instructionsPlaceholder": "One cooking step per line",
+        "originalQuantities": "Original recipe quantities",
+        "plannedQuantities": "Planned meal quantities",
+        "fullRecipe": "Open full recipe page",
         "mealTypeNone": "无餐次",
         "toShoppingSuccess_few": "已向 {{list}} 添加 {{count}} 个食材。",
         "planSuccess": "已把「{{name}}」安排在 {{date}}。",

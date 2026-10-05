@@ -441,3 +441,15 @@ Der erste Lauf lieferte zwei Ursachen für 39 × 2 × 2 Zustände. Erstens: `res
 - Angemeldet wird **einmal** pro Lauf, das Cookie geht an alle Seiten. Der Login-Limiter lässt fünf Versuche pro Minute zu; eine Suite, die pro Sprache neu anmeldet, fällt beim zweiten Lauf hinein - und der 429 sieht aus wie ein fehlender Seed.
 
 **Entwicklung:** `DOCUMENT_GUARDS_BASE_URL=http://localhost:PORT npm run test:document-guards` misst gegen einen bereits laufenden Server und spart Migration und Seed. Ohne die Variable legt der Harness eine temporäre SQLite-Datei an, migriert sie, seedet sie über `scripts/seed-demo.js` und räumt am Ende auf.
+
+### Meal planner reading and event presentation
+
+`npm run test:planner-reading-browser` uses the document-guards harness against
+an isolated migrated database. It checks event colors and segmented assignments
+in month, week, day, agenda and dashboard views at desktop and mobile widths,
+then planned/original recipe quantities, long instructions, retained actions,
+keyboard activation, focus restoration, drag suppression and mobile reading.
+It also runs from `npm run test:document-guards`.
+Set `PUPPETEER_EXECUTABLE_PATH` when using an existing Chromium installation.
+`DOCUMENT_GUARDS_STARTUP_TIMEOUT` overrides the 30-second server startup allowance
+on slower filesystems; `DOCUMENT_GUARDS_DEBUG=1` exposes test-server output.

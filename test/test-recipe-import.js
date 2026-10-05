@@ -41,7 +41,8 @@ test('schema.org Recipe JSON-LD becomes a recipe draft with ingredients and numb
   assert.deepEqual(parseRecipeHtml(html, 'https://www.chefkoch.de/rezepte/123'), {
     title: 'Kartoffelsuppe & Brot',
     recipe_url: 'https://www.chefkoch.de/rezepte/123',
-    notes: '1. Kartoffeln schälen.\n2. 20 Minuten köcheln.',
+    notes: null,
+    instructions: ['Kartoffeln schälen.', '20 Minuten köcheln.'],
     ingredients: [
       { name: 'Kartoffeln', quantity: '500 g', category: 'Sonstiges' },
       { name: 'Salz', quantity: '1/2 TL', category: 'Sonstiges' },
@@ -76,7 +77,7 @@ test('direct import fetches HTML with a guarded lookup and returns a review draf
   assert.equal(typeof requested.options.lookup, 'function');
   assert.equal(requested.options.signal instanceof AbortSignal, true);
   assert.equal(draft.title, 'Schnelle Suppe');
-  assert.equal(draft.notes, '1. Aufkochen.');
+  assert.deepEqual(draft.instructions, ['Aufkochen.']);
 });
 
 test('LLM prompt includes the URL and demands JSON only', () => {
@@ -100,7 +101,8 @@ test('LLM JSON parser accepts a chat preamble and fenced answer, then normalizes
   assert.deepEqual(result, {
     title: 'Toast',
     recipe_url: 'https://example.org/toast',
-    notes: '1. Toast it\n2. Serve',
+    notes: null,
+    instructions: ['Toast it', 'Serve'],
     ingredients: [{ name: 'Bread', quantity: '2 slices', category: 'Sonstiges' }],
   });
 });

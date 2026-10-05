@@ -511,7 +511,7 @@ function renderRecipeList() {
     const isMirrored = recipe.source !== 'native';
     const ingredients = recipe.ingredients ?? [];
     const detailId = `recipe-detail-${recipe.id}`;
-    const hasDetail = Boolean(ingredients.length || recipe.notes || recipe.recipe_url);
+    const hasDetail = Boolean(ingredients.length || recipe.instructions?.length || recipe.notes || recipe.recipe_url);
 
     const li = document.createElement('li');
     li.className = 'recipe-row-item';
@@ -720,6 +720,17 @@ function renderRecipeList() {
           ul.appendChild(item);
         }
         detail.appendChild(ul);
+      }
+
+      if (recipe.instructions?.length) {
+        const steps = document.createElement('ol');
+        steps.className = 'recipe-detail__instructions';
+        for (const step of recipe.instructions) {
+          const item = document.createElement('li');
+          item.textContent = step;
+          steps.appendChild(item);
+        }
+        detail.appendChild(steps);
       }
 
       if (recipe.notes) {
@@ -953,6 +964,10 @@ function openRecipeModal(mode, recipe = null, draft = null) {
         <div class="recipe-ingredient-list" id="recipe-ingredient-list"></div>
         <button class="btn btn--secondary recipe-add-ingredient" type="button" id="recipe-add-ingredient">${t('meals.addIngredient')}</button>
       </div>
+      <div class="form-group">
+        <label class="form-label" for="recipe-instructions">${t('recipes.instructionsLabel')}</label>
+        <textarea id="recipe-instructions" class="form-input" rows="6" placeholder="${t('recipes.instructionsPlaceholder')}"></textarea>
+      </div>
       ${advancedSection(`
         <div class="form-group">
           <label class="form-label" for="recipe-notes">${t('recipes.notesLabel')}</label>
@@ -985,6 +1000,7 @@ function openRecipeModal(mode, recipe = null, draft = null) {
     onSave(panel) {
       panel.querySelector('#recipe-title').value = initial?.title || '';
       panel.querySelector('#recipe-notes').value = initial?.notes || '';
+      panel.querySelector('#recipe-instructions').value = (initial?.instructions || []).join('\n');
       panel.querySelector('#recipe-url').value = initial?.recipe_url || '';
 
       /* BILD (#1059, Schritt 2) - dasselbe Vorgehen wie beim Gegenstandsfoto:
@@ -1088,6 +1104,7 @@ async function saveRecipe(panel, mode, recipe) {
   const saveBtn = panel.querySelector('#recipe-save');
   const title = panel.querySelector('#recipe-title')?.value.trim() || '';
   const notes = panel.querySelector('#recipe-notes')?.value.trim() || null;
+  const instructions = (panel.querySelector('#recipe-instructions')?.value || '').split('\n').map((step) => step.trim()).filter(Boolean);
   const recipe_url = panel.querySelector('#recipe-url')?.value.trim() || null;
   const meal_types = [...panel.querySelectorAll('#recipe-meal-types input[type="checkbox"]:checked')].map((input) => input.value);
 
@@ -1114,10 +1131,10 @@ async function saveRecipe(panel, mode, recipe) {
 
   try {
     if (mode === 'create') {
-      const res = await api.post('/recipes', { title, notes, recipe_url, meal_types, ingredients, ...bildFeld });
+      const res = await api.post('/recipes', { title, notes, instructions, recipe_url, meal_types, ingredients, ...bildFeld });
       state.recipes.push(res.data);
     } else {
-      const res = await api.put(`/recipes/${recipe.id}`, { title, notes, recipe_url, meal_types, ingredients, ...bildFeld });
+      const res = await api.put(`/recipes/${recipe.id}`, { title, notes, instructions, recipe_url, meal_types, ingredients, ...bildFeld });
       const idx = state.recipes.findIndex((r) => r.id === recipe.id);
       if (idx >= 0) state.recipes[idx] = res.data;
     }
@@ -1290,6 +1307,7 @@ async function duplicateRecipe(recipe) {
   const copySuffix = t('recipes.copySuffix');
   const title = `${recipe.title} (${copySuffix})`;
   const notes = recipe.notes || null;
+  const instructions = recipe.instructions || [];
   const recipe_url = recipe.recipe_url || null;
   const ingredients = (recipe.ingredients || []).map((ing) => ({
     name: ing.name,
@@ -1298,7 +1316,7 @@ async function duplicateRecipe(recipe) {
   }));
 
   try {
-    const res = await api.post('/recipes', { title, notes, recipe_url, ingredients });
+    const res = await api.post('/recipes', { title, notes, instructions, recipe_url, ingredients });
     state.recipes.push(res.data);
     renderRecipeList();
     window.yuvomi?.showToast(t('recipes.duplicated'), 'success');

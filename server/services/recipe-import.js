@@ -142,12 +142,13 @@ export function parseRecipeHtml(html, recipeUrl) {
     .filter((ingredient) => ingredient.name)
     .slice(0, 250);
   const steps = instructionTexts(recipe.recipeInstructions).slice(0, 100);
-  const notes = steps.map((step, index) => `${index + 1}. ${step}`).join('\n').slice(0, 5000) || null;
+  const notes = cleanText(recipe.description).slice(0, 5000) || null;
 
   return {
     title,
     recipe_url: recipeUrl,
     notes,
+    instructions: steps.map((step) => step.slice(0, 5000)),
     ingredients,
   };
 }

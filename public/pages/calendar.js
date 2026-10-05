@@ -19,6 +19,7 @@ import { truncateRuleBefore, followingMeansWholeSeries,
          isLocalRecurringSeries, isExternalRecurringSeries } from '/utils/recurrence-scope.js';
 import { getReadableTextColor } from '/utils/color.js';
 import { resolveEventColor } from '/utils/event-color.js';
+import { renderEventAssigneeBar } from '/components/event-assignees.js';
 import { refresh as refreshReminders } from '/reminders.js';
 import { parseRemindAtAsUtc } from '/utils/reminder-offset.js';
 import { renderUserMultiSelect, getSelectedUserIds, bindUserMultiSelect, renderAvatarStack } from '/components/user-multi-select.js';
@@ -534,20 +535,10 @@ function openIconPickerDialog(selectedIcon, onSelect, onClose = () => {}) {
 
 // --------------------------------------------------------
 // Farbberechnung: die spezifischste Angabe gewinnt
-// Hierarchie: eigene Terminfarbe → erster Assignee → Kalenderfarbe → Grau
+// Hierarchie: eigene Terminfarbe → Kalenderfarbe → Grau
 // --------------------------------------------------------
 
-/** Neutrale Fallback-Farbe wenn weder Assignee noch manuelle Farbe gesetzt. */
-// Die Rangfolge selbst steht in utils/event-color.js, weil das Dashboard
-// dieselbe Frage stellt und vor #891 eine eigene, kuerzere Antwort hatte.
-
-/**
- * Gibt eine einzelne CSS-Füllfarbe zurück (nie ein Gradient).
- * Eine Farbachse: 1. eigene Terminfarbe, 2. erster Assignee, 3. Kalenderfarbe, 4. Grau.
- * Mehrere Zugewiesene werden über den Avatar-Stack kommuniziert, nicht über eine
- * diagonal geteilte Füllung — die wirkte wie ein Render-Artefakt und blieb bei der
- * zweiten Farbe ungeprüft im Kontrast.
- */
+/** Calendar color and assignment are independent presentation channels. */
 function resolveEventBackground(ev) {
   return resolveEventColor(ev);
 }
@@ -562,12 +553,7 @@ function eventSurfaceStyle(ev) {
   return `--ev-color:${esc(resolveEventColor(ev))};`;
 }
 
-/**
- * Rendert den Avatar-Stack der Zugewiesenen für einen Termin-Chip in den
- * Gitter-Ansichten (Monat/Woche/Tag). Die Chip-Farbe trägt bereits den ersten
- * Assignee; der Stack liefert die Identität (Foto/Initialen), die Farbe allein
- * nicht kommunizieren kann. Leerstring, wenn niemand zugewiesen ist.
- */
+/** Avatars supplement the segmented user-color bar with identity. */
 function chipAssigneeStack(ev, { size, maxVisible }) {
   const users = ev.assigned_users ?? [];
   if (!users.length) return '';
@@ -637,14 +623,8 @@ let state = {
   // DIE ACHSE IST DIE PERSON, NICHT DER KALENDER - und das ist eine gemessene
   // Entscheidung, keine Auslegung. Die Critique vom 2026-08-28 verlangte einen
   // „Kalenderfilter mit Legende" nach Apples Muster. Eine FARBLEGENDE ist hier
-  // aber nicht konstruierbar: `resolveEventColor()` (utils/event-color.js)
-  // beantwortet die Farbe aus DREI Quellen in Rangfolge - eigene Terminfarbe,
-  // Farbe der primaeren zugewiesenen Person, Kalenderfarbe. Eine Legende, die
-  // „diese Farbe = jener Kalender" behauptet, waere bei jedem Termin falsch,
-  // der eine eigene Farbe traegt oder von einer Person erbt - also bei der
-  // Mehrheit. Die Person dagegen ist eindeutig: sie steht in
-  // `assigned_users`, ihre Farbe gehoert ihr, und in einem FAMILIENplaner ist
-  // „wessen Termin ist das" die Frage, die der Filter beantworten soll.
+  // Calendar colors describe sources; the separate bar describes assignees.
+  // Explicit event overrides remain independent of both filters.
   people:        new Set(),
   // Direct manipulation lives in page state so a period change can replace
   // the calendar DOM without losing the active gesture.
@@ -2741,7 +2721,7 @@ function renderMonthDay(date, inMonth) {
          data-calendar-direct-event
          style="${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}"
-    ><span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span><span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
+    >${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span><span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
   `).join('');
 
   const taskHtml = taskShown.map((tk) => renderTaskChip(tk, { interactive: false, icon: false })).join('');
@@ -2973,7 +2953,7 @@ function renderWeekView(container) {
             ${alldayEvs[i].map((ev) => `
               <div class="allday-event" data-id="${ev.id}" data-calendar-direct-event
                    style="${eventSurfaceStyle(ev)}"
-                   title="${esc(ev.title)}${ev.cal_name ? ' · ' + ev.cal_name : ''}${chipAssigneeTitleSuffix(ev)}"><span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
+                   title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
             `).join('')}
             ${tasksOnDay(d).map(renderTaskChip).join('')}
           </div>
@@ -3067,6 +3047,7 @@ function renderWeekEvent(ev, layout = null) {
     <div class="week-event" data-id="${ev.id}" data-calendar-direct-event
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${chipAssigneeTitleSuffix(ev)}">
+      ${renderEventAssigneeBar(ev)}
       <span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span><div class="week-event__title">${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 14, maxVisible: 2 })}</div>
       <div class="week-event__time">${formatTime(ev.start_datetime)}${ev.end_datetime ? '–' + formatTime(ev.end_datetime) : ''}</div>
       <span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span>
@@ -3236,7 +3217,7 @@ function renderDayView(container) {
           ${allday.map((ev) => `
             <div class="allday-event" data-id="${ev.id}" data-calendar-direct-event
                  style="${eventSurfaceStyle(ev)}"
-                 title="${esc(ev.title)}${ev.cal_name ? ' · ' + ev.cal_name : ''}${chipAssigneeTitleSuffix(ev)}"><span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>`).join('')}
+                 title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>`).join('')}
           ${tasksOnDay(state.cursor).map(renderTaskChip).join('')}
         </div>
       </div>` : ''}
@@ -3327,6 +3308,7 @@ function renderDayEvent(ev, layout = null) {
     <div class="day-event${roomy ? '' : ' day-event--tight'}" data-id="${ev.id}" data-calendar-direct-event
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.location ? ' · ' + esc(fmtLocation(ev.location)) : ''}${chipAssigneeTitleSuffix(ev)}">
+      ${renderEventAssigneeBar(ev)}
       <span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span><span class="day-event__spine" aria-hidden="true"></span>
       <span class="day-event__text">
         <span class="day-event__title">${hasEventIcon(ev.icon) ? eventIconHtml(ev.icon, 'event-icon event-icon--compact') : ''}${calendarRepeatIconHtml(ev)}<span class="day-event__name">${esc(ev.title)}</span></span>
@@ -3454,12 +3436,8 @@ function renderAgendaView(container) {
 // ihre Beschriftung zurueck, ihr Zustand ist eine echte Checkbox statt einer
 // Waschung, und der Kopf gibt eine Zeile her.
 //
-// WAS ES NICHT IST: eine FARBLEGENDE. Die Farbe eines Termins kommt aus drei
-// Quellen in Rangfolge (`resolveEventColor`, utils/event-color.js) - eigene
-// Farbe, primaere zugewiesene Person, Kalender. Eine Legende „diese Farbe =
-// jener Kalender" waere bei jedem Termin falsch, der eine der ersten beiden
-// Quellen nutzt. Die Person ist die einzige Achse, die eindeutig ist, und in
-// einem Familienplaner ist sie auch die gefragte.
+// Source colors and assignee colors are independent; filtering keeps its
+// existing layer and people controls.
 // --------------------------------------------------------
 
 /** Die Ebenen, die es im aktuellen Zustand ueberhaupt gibt. */
@@ -3993,6 +3971,7 @@ function renderAgendaEvent(ev, dayStr) {
   return `
     <div class="list-row agenda-event" data-id="${ev.id}" role="button" tabindex="0"
          aria-label="${esc(agendaEventAriaLabel(ev, timeStr))}">
+      ${renderEventAssigneeBar(ev)}
       <div class="agenda-event__color" style="background:${esc(displayBg)};"></div>
       <div class="agenda-event__body">
         <div class="agenda-event__title">${eventIconHtml(ev.icon)}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span></div>

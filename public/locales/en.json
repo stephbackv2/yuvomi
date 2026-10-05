@@ -2855,6 +2855,11 @@
         "importSelected": "{{count}} contacts selected"
     },
     "recipes": {
+        "instructionsLabel": "Cooking instructions",
+        "instructionsPlaceholder": "One cooking step per line",
+        "originalQuantities": "Original recipe quantities",
+        "plannedQuantities": "Planned meal quantities",
+        "fullRecipe": "Open full recipe page",
         "mealTypeNone": "No meal",
         "toShoppingSuccess_few": "{{count}} ingredients added to {{list}}.",
         "planSuccess": "{{name}} planned for {{date}}.",

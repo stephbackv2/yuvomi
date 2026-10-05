@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Task completion and reopening share one atomic operation.** Creation, full
+  updates and status actions keep rewards, history and recurring follow-ups in
+  step. Reopening preserves edited successors, and status actions honor task
+  visibility.
+
 - **Calendar recovery preserves newer deliberate changes after Reload.** Full
   editor submissions merge unchanged authoritative fields, moves keep absolute
   targets and resizing keeps the refreshed untouched edge. Conflicting field
@@ -23,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   obsolete choices, allowing the remaining conflicts to be resolved.
 
 ### Added
+
+- **Meal-planner cards open a scrollable recipe reader.** Planned ingredients
+  keep their saved quantities; recipe cards and meals without saved ingredient
+  rows show labeled original quantities. Recipe instructions are stored separately
+  from notes, including URL imports, and existing edit and icon actions remain.
+- **Calendar cards show calendar colors and segmented assignee bars.** Explicit
+  event colors take precedence over inherited calendar colors. User colors appear
+  independently, with readable identity across calendar and dashboard views.
 
 - **Recipes can be imported from the five most-used German recipe sites.** A
   supported URL fills the title, ingredients, preparation steps and source link

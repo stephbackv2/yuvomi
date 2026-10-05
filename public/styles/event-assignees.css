@@ -1,0 +1,16 @@
+/* Shared by calendar grids, agenda, dashboard and their mobile layouts. */
+:where(.month-day__event, .allday-event, .week-event, .day-event, .agenda-event, .event-item, .countdown-item, .today-cockpit-card--event, .wall-row--event) {
+  position: relative;
+}
+.event-assignees {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  display: flex;
+  height: var(--space-1);
+  overflow: hidden;
+  border-end-start-radius: inherit;
+  border-end-end-radius: inherit;
+  pointer-events: none;
+}
+.event-assignees__segment { flex: 1; min-width: 0; }

@@ -691,7 +691,7 @@ test('der Sprung beim Aufholen liefert dasselbe wie das Zaehlen (#877)', () => {
 // Die geliehene Farbe (#891)
 // --------------------------------------------------------
 
-test('ein Countdown ohne eigene Farbe leiht sich die der zugewiesenen Person', () => {
+test('ein Countdown ohne eigene Kalenderfarbe bleibt trotz Zugewiesenen neutral', () => {
   // Die Kachel loeste die Farbe bis v2.48.0 selbst auf - `row.color || null` -,
   // was folgenlos war, solange die Spalte NOT NULL war. Mit einer Farbe, die
   // fehlen DARF, saehe derselbe Termin hier farblos aus (Modulton) und im
@@ -706,8 +706,8 @@ test('ein Countdown ohne eigene Farbe leiht sich die der zugewiesenen Person', (
 
   const zeile = getCountdowns(get(), { userId: ALICE, todayKey: heute }).items.find((c) => c.title === 'Geliehen');
   assert.ok(zeile, 'der Countdown muss ueberhaupt erscheinen');
-  assert.equal(zeile.color, '#EC4899',
-    'ohne eigene Farbe gilt die der zugewiesenen Person, nicht der Modulton');
+  assert.equal(zeile.color, null);
+  assert.equal(zeile.assigned_users[0].color, '#EC4899');
 });
 
 test('eine eigene Farbe schlaegt die geliehene weiterhin', () => {
@@ -764,8 +764,8 @@ test('ein geloeschtes primaeres Mitglied laesst die Kachel nicht farblos zurueck
 
   const zeile = getCountdowns(get(), { userId: ALICE, todayKey: '2026-08-27' })
     .items.find((c) => c.title === 'Verwaist');
-  assert.equal(zeile.color, '#D8B349',
-    'die Kachel faellt auf den verbliebenen Zugewiesenen zurueck, nicht auf den Modulton');
+  assert.equal(zeile.color, null);
+  assert.equal(zeile.assigned_users[0].color, '#D8B349');
 });
 
 test('der Countdown zeigt kein Datum, an dem die Serie kein Vorkommen hat (#960)', () => {

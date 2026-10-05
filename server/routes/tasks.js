@@ -9,9 +9,8 @@ import express from 'express';
 import * as db from '../db.js';
 import { documentVisibleSql } from '../services/document-access.js';
 import { assertDocumentsNotDeleting, sendDocumentDeletionConflict } from '../services/document-deletion-lock.js';
-import { nextDueAfterCompletion } from '../services/recurrence.js';
-import { syncTaskRewards } from '../services/rewards.js';
-import { completionFeed, seriesHistory, syncTaskCompletion } from '../services/task-completions.js';
+import { transitionTaskStatus } from '../services/task-transitions.js';
+import { completionFeed, seriesHistory } from '../services/task-completions.js';
 import { normalizeCategoryFilter, taskCategoryWhere, taskScopeNeedsToday, taskScopeWhere } from '../services/task-scope.js';
 import { normalizeVisibility, visibilityWhere } from '../services/visibility.js';
 import {
@@ -24,7 +23,6 @@ import { mentionedUserIds } from '../../public/utils/mentions.js';
 import { toggleChecklistLine } from '../../public/utils/markdown-checklist.js';
 import { resolvePermissions } from '../permissions.js';
 import { pushService } from '../services/push.js';
-import { todayKey } from '../utils/timezone.js';
 import {
   allTags, applyTagChanges, loadTags, loadTagsFor, normalizeTags,
   removeTagEverywhere, renameTag, setTags, tagKey, tagsKey, taskIdsWithTag,
@@ -132,21 +130,6 @@ function taskCategoryInUseCount(key) {
   return db.get().prepare('SELECT COUNT(*) AS n FROM tasks WHERE category = ?').get(key).n;
 }
 
-/**
- * Der heutige Tag in der Zone des Haushalts (YYYY-MM-DD).
- *
- * Wichtig für die Serienrechnung (#658): "an dem Tag, an dem ich sie erledigt
- * habe" ist eine Wanduhr-Aussage. Wer um 00:30 in Berlin abhakt, hat es am
- * neuen Tag getan, auch wenn in UTC noch der Vortag läuft - eine wöchentliche
- * Aufgabe wäre sonst sechs statt sieben Tage später fällig. Dieselbe Zone
- * begrenzt auch das Aufholen der fälligkeitsverankerten Serien, damit die
- * Folgeinstanz nicht in einem Zeitzonen-Saum als überfällig entsteht;
- * `due_date` ist ohnehin ein reiner Wanduhr-Wert (siehe utils/timezone.js).
- */
-function todayInHouseholdZone() {
-  return todayKey(db.get());
-}
-
 /** Punktewert einer Aufgabe auf eine nichtnegative Ganzzahl normalisieren. */
 function clampPoints(val) {
   const n = Math.trunc(Number(val));
@@ -242,19 +225,6 @@ function setAssignments(d, taskId, userIds) {
   d.prepare('DELETE FROM task_assignments WHERE task_id = ?').run(taskId);
   const ins = d.prepare('INSERT OR IGNORE INTO task_assignments (task_id, user_id) VALUES (?, ?)');
   for (const uid of userIds) ins.run(taskId, uid);
-}
-
-function syncHousekeepingPaymentStatus(d, taskId, status) {
-  const table = d.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'housekeeping_work_sessions'").get();
-  if (!table) return;
-  d.prepare(`
-    UPDATE housekeeping_work_sessions
-    SET paid_at = CASE
-      WHEN ? = 'done' THEN COALESCE(paid_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-      ELSE NULL
-    END
-    WHERE payment_task_id = ?
-  `).run(status, taskId);
 }
 
 /** Alle Subtasks einer Aufgabe laden (eine Ebene tief). */
@@ -1018,7 +988,7 @@ router.post('/', (req, res) => {
            recurrence_from_completion, points, visibility, countdown, locked)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        title.trim(), description, category, priority, status,
+        title.trim(), description, category, priority, 'open',
         start_date, due_date, due_time, firstUid, req.authUserId || req.session.userId, parent_task_id,
         is_recurring ? 1 : 0, recurrence_rule, recurrence_from_completion ? 1 : 0, points, visibility,
         countdown ? 1 : 0, req.body.locked ? 1 : 0
@@ -1030,27 +1000,10 @@ router.post('/', (req, res) => {
           'UPDATE tasks SET target_caldav_account_id = ?, target_caldav_list_url = ? WHERE id = ?'
         ).run(syncTarget.accountId, syncTarget.listUrl, result.lastInsertRowid);
       }
-      // EIN ANLEGEN MIT STATUS IST EIN STATUSWECHSEL - er faengt nur bei 'open'
-      // an statt bei einem gespeicherten Wert. Er laeuft deshalb durch dieselben
-      // Uebergangsfunktionen wie PUT und PATCH. Wuerde hier nur die Spalte
-      // gefuellt, haetten Punktekonto und Verlauf zwei Buchhaltungen: dieselbe
-      // erledigte Aufgabe zaehlte, je nachdem ob sie erledigt angelegt oder
-      // erledigt abgehakt wurde.
-      //
-      // syncHousekeepingPaymentStatus steht bewusst nicht dabei: es aktualisiert
-      // eine Zahlungszeile, die eine gerade erst angelegte Aufgabe noch nicht hat.
-      if (status !== 'open') {
-        const actingUserId = req.authUserId || req.session.userId;
-        const newId = Number(result.lastInsertRowid);
-        syncTaskRewards(db.get(), newId, 'open', status, actingUserId);
-        syncTaskCompletion(db.get(), newId, 'open', status, actingUserId);
-        // Erledigt angelegte Serie: die naechste Instanz gehoert dazu, genau wie
-        // beim Abhaken. Ohne sie endete eine Serie in dem Moment, in dem sie
-        // entsteht.
-        if (status === 'done') {
-          spawnRecurrenceFollowup(db.get().prepare('SELECT * FROM tasks WHERE id = ?').get(newId));
-        }
-      }
+      if (status !== 'open') transitionTaskStatus({
+        taskId: Number(result.lastInsertRowid), status,
+        actingUserId: req.authUserId || req.session.userId,
+      });
       return result.lastInsertRowid;
     })();
 
@@ -1200,40 +1153,30 @@ router.put('/:id', (req, res) => {
     let undone  = 0;
     let updated;
     db.get().transaction(() => {
-      db.get().prepare(`
-        UPDATE tasks SET
-          title = ?, description = ?, category = ?, priority = ?,
-          status = ?, start_date = ?, due_date = ?, due_time = ?, assigned_to = ?,
-          is_recurring = ?, recurrence_rule = ?, recurrence_from_completion = ?,
-          points = ?, visibility = ?, countdown = ?, locked = ?
-        WHERE id = ?
-      `).run(title.trim(), description, category, priority,
-             status, start_date, due_date, due_time, firstUid,
-             is_recurring ? 1 : 0, recurrence_rule, recurrence_from_completion ? 1 : 0,
-             points, visibility, countdown ? 1 : 0, locked, req.params.id);
-      setAssignments(db.get(), task.id, userIds);
-      if (req.body.tags !== undefined) setTags(db.get(), task.id, req.body.tags);
-      if (syncTarget !== undefined) {
-        db.get().prepare(
-          'UPDATE tasks SET target_caldav_account_id = ?, target_caldav_list_url = ? WHERE id = ?'
-        ).run(syncTarget?.accountId ?? null, syncTarget?.listUrl ?? null, task.id);
-      }
-      if (archiveRequested && !task.archived_at) setArchived(task.id, true);
-      syncHousekeepingPaymentStatus(db.get(), req.params.id, status);
-      // Punkte erst nach setAssignments: die Zuständigen werden daraus abgeleitet.
-      syncTaskRewards(db.get(), task.id, task.status, status, req.authUserId || req.session.userId);
-      // Derselbe Übergang, ein zweiter Vorgang: der Verlauf hält fest, DASS
-      // abgehakt wurde (#791). Bewusst neben der Punktevergabe statt in ihr -
-      // Punkte gehen an die Zuständigen und nur bei eingeschaltetem Modul, ein
-      // Verlaufseintrag gilt für jede Aufgabe und nennt die handelnde Person.
-      syncTaskCompletion(db.get(), task.id, task.status, status, req.authUserId || req.session.userId);
-
-      // Auch über das Bearbeiten-Formular lässt sich ein Abhaken zurücknehmen -
-      // die Folgeinstanz muss dann genauso verschwinden wie beim Klick auf die
-      // Checkbox (#650).
-      if (task.status === 'done' && status !== 'done') {
-        undone = discardRecurrenceFollowup(task.id);
-      }
+      ({ undone } = transitionTaskStatus({
+        taskId: task.id, status, actingUserId: req.authUserId || req.session.userId,
+        updateDefinition() {
+          db.get().prepare(`
+            UPDATE tasks SET
+              title = ?, description = ?, category = ?, priority = ?,
+              start_date = ?, due_date = ?, due_time = ?, assigned_to = ?,
+              is_recurring = ?, recurrence_rule = ?, recurrence_from_completion = ?,
+              points = ?, visibility = ?, countdown = ?, locked = ?
+            WHERE id = ?
+          `).run(title.trim(), description, category, priority,
+                 start_date, due_date, due_time, firstUid,
+                 is_recurring ? 1 : 0, recurrence_rule, recurrence_from_completion ? 1 : 0,
+                 points, visibility, countdown ? 1 : 0, locked, req.params.id);
+          setAssignments(db.get(), task.id, userIds);
+          if (req.body.tags !== undefined) setTags(db.get(), task.id, req.body.tags);
+          if (syncTarget !== undefined) {
+            db.get().prepare(
+              'UPDATE tasks SET target_caldav_account_id = ?, target_caldav_list_url = ? WHERE id = ?'
+            ).run(syncTarget?.accountId ?? null, syncTarget?.listUrl ?? null, task.id);
+          }
+          if (archiveRequested && !task.archived_at) setArchived(task.id, true);
+        },
+      }));
 
       // Nur was die Schreibarbeit unten braucht, liegt in der Transaktion: die
       // frische Zeile und ihre Tags (der Feldvergleich kennt tags_key). Das
@@ -1256,10 +1199,6 @@ router.put('/:id', (req, res) => {
         { ...updated, tags_key: tagsKey(updated.tags) },
       );
 
-      // Das Status-Dropdown im Bearbeiten-Formular hakt genauso ab wie die Checkbox -
-      // also muss es die Serie genauso weiterschreiben. Grundlage ist die frisch
-      // gelesene Zeile, damit im selben Zug geänderte Regel/Fälligkeit schon zählen.
-      if (status === 'done' && task.status !== 'done') spawnRecurrenceFollowup(updated);
     })();
 
     addAssignedUsers(updated);
@@ -1273,214 +1212,6 @@ router.put('/:id', (req, res) => {
     res.status(500).json({ error: 'Internal server error.', code: 500 });
   }
 });
-
-/**
- * Die Folgeinstanz, die beim Erledigen dieser Aufgabe entstanden ist (#650) -
- * oder null. Es gibt höchstens eine: der Spawn legt nur an, wenn hier nichts
- * steht.
- *
- * `parent_task_id IS NULL` ist keine Beschleunigung, sondern die Bedingung
- * selbst: `recurrence_origin_id` trägt seit #742 zwei Bedeutungen. An einer
- * Wurzelaufgabe heißt es "ich bin der nächste Durchlauf von X", an einer
- * Unteraufgabe nur "ich bin die Kopie von Y in diesem Durchlauf". Ohne die
- * Einschränkung fand das Enthaken einer Unteraufgabe der erledigten Instanz
- * deren Kopie im neuen Durchlauf, hielt sie für die Folgeinstanz und löschte
- * sie - die nächste Instanz verlor lautlos eine Unteraufgabe (#924). Nur die
- * erste Bedeutung ist eine Folgeinstanz.
- */
-function recurrenceFollowupOf(taskId) {
-  return db.get().prepare(
-    `SELECT * FROM tasks
-      WHERE recurrence_origin_id = ? AND parent_task_id IS NULL
-      ORDER BY id LIMIT 1`
-  ).get(taskId) ?? null;
-}
-
-/**
- * Prüft, ob Unteraufgaben einer Folgeinstanz durch den Benutzer verändert wurden
- * (editiert, erledigt, hinzugefügt oder gelöscht).
- */
-function isFollowupSubtasksTouched(followup) {
-  const originTaskId = followup.recurrence_origin_id;
-  const originSubtasks = originTaskId
-    ? db.get().prepare('SELECT * FROM tasks WHERE parent_task_id = ?').all(originTaskId)
-    : [];
-  const currentSubtasks = db.get()
-    .prepare('SELECT * FROM tasks WHERE parent_task_id = ?')
-    .all(followup.id);
-
-  if (currentSubtasks.length !== originSubtasks.length) return true;
-
-  const originDueDate = originTaskId
-    ? db.get().prepare('SELECT due_date FROM tasks WHERE id = ?').get(originTaskId)?.due_date
-    : null;
-
-  for (const sub of currentSubtasks) {
-    if (sub.status !== 'open' || !sub.recurrence_origin_id) return true;
-    const origin = originSubtasks.find((o) => o.id === sub.recurrence_origin_id);
-    if (!origin) return true;
-
-    if (
-      sub.title !== origin.title ||
-      (sub.description || '') !== (origin.description || '') ||
-      sub.category !== origin.category ||
-      sub.priority !== origin.priority ||
-      sub.assigned_to !== origin.assigned_to ||
-      sub.points !== origin.points ||
-      sub.visibility !== origin.visibility ||
-      sub.due_time !== origin.due_time
-    ) {
-      return true;
-    }
-
-    const subAnchorDate = originDueDate || origin.due_date;
-    const expectedStart = shiftedStartDate(origin.start_date, subAnchorDate, followup.due_date) ?? origin.start_date;
-    const expectedDue = origin.due_date
-      ? (shiftedStartDate(origin.due_date, subAnchorDate, followup.due_date) ?? followup.due_date)
-      : null;
-
-    if (sub.start_date !== expectedStart || sub.due_date !== expectedDue) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/**
- * Nimmt die Folgeinstanz zurück, wenn ein Abhaken rückgängig gemacht wird (#650).
- * Nur unangetastete Instanzen verschwinden: hat jemand sie selbst erledigt (und
- * damit die Serie weitergeschrieben) oder ihr Unteraufgaben gegeben/erledigt/bearbeitet, steckt dort
- * Arbeit, die ein Klick auf die Vorgängerin nicht wegwerfen darf.
- * Rückgabe: Anzahl vorgemerkter CalDAV-Löschungen.
- */
-function discardRecurrenceFollowup(taskId) {
-  const followup = recurrenceFollowupOf(taskId);
-  if (!followup || followup.status !== 'open') return 0;
-
-  if (isFollowupSubtasksTouched(followup) || recurrenceFollowupOf(followup.id)) return 0;
-
-  // Vor dem DELETE vormerken, wie in DELETE /:id: danach sind UID und Objekt-URL
-  // weg. Lokal erzeugte Folgeinstanzen sind nicht gespiegelt, dann ist das ein No-op.
-  const queued = queueTodoDeletion('tasks', followup) ? 1 : 0;
-  db.get().prepare('DELETE FROM tasks WHERE id = ?').run(followup.id);
-  return queued;
-}
-
-/**
- * Der Vorlauf gehört zum Durchlauf, nicht zum Kalender: beginnt eine Aufgabe
- * drei Tage vor ihrer Fälligkeit, tut sie das auch beim nächsten Mal.
- *
- * Ohne Start- oder Fälligkeitsdatum gibt es nichts zu verschieben (NULL). Der
- * zweite Fall ist erreichbar: eine erledigungsverankerte Serie (#658) läuft
- * auch ohne Fälligkeitsdatum weiter, und dann fehlt der Bezugspunkt, an dem ein
- * Vorlauf gemessen wäre.
- */
-function shiftedStartDate(startDate, dueDate, nextDue) {
-  if (!startDate || !dueDate) return null;
-  const lead = Date.parse(`${dueDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`);
-  if (!Number.isFinite(lead)) return null;
-  return new Date(Date.parse(`${nextDue}T00:00:00Z`) - lead).toISOString().slice(0, 10);
-}
-
-/**
- * Schreibt die Serie weiter: nächste Instanz anlegen, wenn eine wiederkehrende
- * Aufgabe erledigt wurde. Erwartet die bereits auf 'done' gesetzte Zeile.
- *
- * Beide Wege zum Haken müssen hier durch - die Checkbox (PATCH /:id/status) und
- * das Status-Dropdown im Bearbeiten-Dialog (PUT /:id). Lag der Spawn nur im
- * einen, beendete der andere die Serie lautlos.
- *
- * Ohne Rückgabewert, anders als discardRecurrenceFollowup: die Folgeinstanz
- * entsteht ohne external_uid/external_source, markTodoOutbound lässt sie
- * deshalb liegen. Es gibt nichts zu pushen.
- *
- * Beide Aufrufer halten bereits eine Transaktion, die eigene läuft darin als
- * Savepoint. Sie bleibt trotzdem stehen: sie hält Aufgabe, Zuweisungen und Tags
- * auch dann zusammen, wenn später jemand von außerhalb einer Transaktion ruft.
- */
-function spawnRecurrenceFollowup(task) {
-  if (!task?.is_recurring || !task.recurrence_rule || task.parent_task_id) return;
-  // Höchstens eine Folgeinstanz je Erledigung - sonst legt doppeltes Abhaken nach.
-  if (recurrenceFollowupOf(task.id)) return;
-
-  // Zwei Verankerungen, die Aufgabe entscheidet (#658): ab Fälligkeit
-  // (Vorgabe, holt übersprungene Vorkommen auf, damit die nächste Instanz
-  // nicht selbst überfällig entsteht) oder ab dem Tag des Abhakens.
-  const completedOn = todayInHouseholdZone();
-  const nextDate = nextDueAfterCompletion({
-    anchorDate: task.due_date,
-    rule: task.recurrence_rule,
-    completedOn,
-    fromCompletion: !!task.recurrence_from_completion,
-  });
-  if (!nextDate) return;
-
-  const existingAssignments = db.get()
-    .prepare('SELECT user_id FROM task_assignments WHERE task_id = ?')
-    .all(task.id).map((r) => r.user_id);
-  // Die Tags gehören zur Aufgabe, nicht zum einzelnen Durchlauf (#586).
-  // Ohne das Mitnehmen verlöre eine wöchentliche Aufgabe ihre Etiketten
-  // beim ersten Abhaken - und zwar lautlos, weil die Folgeinstanz sonst
-  // vollständig aussieht.
-  const existingTags = loadTags(db.get(), task.id);
-  // Unteraufgaben gehören ebenfalls zur Aufgabenstruktur (#742).
-  // Beim Folgedurchlauf werden sie mit zurückgesetztem Status ('open') kopiert.
-  const existingSubtasks = db.get()
-    .prepare('SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY id ASC')
-    .all(task.id);
-
-  db.get().transaction(() => {
-    const newTask = db.get().prepare(`
-      INSERT INTO tasks (title, description, category, priority, status,
-        start_date, due_date, due_time, assigned_to, created_by, is_recurring, recurrence_rule,
-        points, visibility, recurrence_from_completion, countdown, recurrence_origin_id)
-      VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
-    `).run(
-      task.title, task.description, task.category, task.priority,
-      shiftedStartDate(task.start_date, task.due_date, nextDate),
-      nextDate, task.due_time, task.assigned_to, task.created_by,
-      task.recurrence_rule, task.points, task.visibility,
-      // Ohne das Mitnehmen fiele die Serie ab der zweiten Instanz auf die
-      // Fälligkeitsrechnung zurück - lautlos, weil die Folgeinstanz sonst
-      // vollständig aussieht (wie bei den Tags oben).
-      task.recurrence_from_completion ? 1 : 0,
-      // Und aus demselben Grund die Countdown-Markierung (#647). Sie ist bei
-      // dieser Sorte Aufgabe sogar der Anlass: „immer wieder N Jahre" (Führer-
-      // schein) oder „N Tage ab Reinigung" (Luftfilter) ist eine Serie, die ab
-      // Erledigung rechnet - der Countdown, der genau davon lebt, dürfte beim
-      // ersten Zurücksetzen nicht verschwinden.
-      task.countdown ? 1 : 0,
-      task.id
-    );
-    setAssignments(db.get(), newTask.lastInsertRowid, existingAssignments);
-    setTags(db.get(), newTask.lastInsertRowid, existingTags);
-
-    for (const sub of existingSubtasks) {
-      const subAssignments = db.get()
-        .prepare('SELECT user_id FROM task_assignments WHERE task_id = ?')
-        .all(sub.id).map((r) => r.user_id);
-      const subTags = loadTags(db.get(), sub.id);
-
-      const subAnchorDate = task.due_date || sub.due_date;
-
-      const newSub = db.get().prepare(`
-        INSERT INTO tasks (title, description, category, priority, status,
-          start_date, due_date, due_time, assigned_to, created_by, parent_task_id,
-          is_recurring, recurrence_rule, points, visibility, recurrence_origin_id)
-        VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)
-      `).run(
-        sub.title, sub.description, sub.category, sub.priority,
-        shiftedStartDate(sub.start_date, subAnchorDate, nextDate) ?? sub.start_date,
-        sub.due_date ? (shiftedStartDate(sub.due_date, subAnchorDate, nextDate) ?? nextDate) : null,
-        sub.due_time, sub.assigned_to, sub.created_by, newTask.lastInsertRowid,
-        sub.points, sub.visibility, sub.id
-      );
-      setAssignments(db.get(), newSub.lastInsertRowid, subAssignments);
-      setTags(db.get(), newSub.lastInsertRowid, subTags);
-    }
-  })();
-}
 
 // --------------------------------------------------------
 // PATCH /api/v1/tasks/:id/status
@@ -1501,6 +1232,10 @@ router.patch('/:id/status', (req, res) => {
     if (!prev)
       return res.status(404).json({ error: 'Task not found.', code: 404 });
 
+    if (!mayAccessTask(prev, req.authUserId || req.session.userId)) {
+      return res.status(404).json({ error: 'Task not found.', code: 404 });
+    }
+
     // Ablegen ist kein Statuswechsel: kein Punkte-Storno, keine Serien-Bewegung,
     // kein CalDAV-Push. Genau daran hing #688 - die Ablage überschrieb das 'done'
     // und syncTaskRewards nahm die Gutschrift dafür wieder zurück.
@@ -1509,42 +1244,16 @@ router.patch('/:id/status', (req, res) => {
       return res.json({ data: { id: Number(req.params.id), status: prev.status, archived_at: archivedAt } });
     }
 
-    // Statuswechsel und die Serien-Bewegung, die daraus folgt, sind eine Einheit:
-    // scheitert das Nachlegen oder das Zurücknehmen der Folgeinstanz, darf die
-    // Aufgabe nicht trotzdem umgeschaltet zurückbleiben. Sonst endete die Serie
-    // still (kein Nachfolger) oder stünde doppelt da - genau die beiden Fehler,
-    // gegen die dieser Block gebaut ist. Der Outbound-Marker gehört mit hinein:
-    // ohne Statuswechsel gibt es auch nichts zu pushen.
-    let pending = false;
-    let undone  = 0;
-    db.get().transaction(() => {
-      db.get().prepare('UPDATE tasks SET status = ? WHERE id = ?').run(status, req.params.id);
-      pending = markTodoOutbound('tasks', prev, { ...prev, status });
-
-      syncHousekeepingPaymentStatus(db.get(), req.params.id, status);
-      // Punkte-Gutschrift/Storno an den Aufgaben-Statuswechsel koppeln.
-      syncTaskRewards(db.get(), Number(req.params.id), prev.status, status, req.authUserId || req.session.userId);
-      // Der Verlauf hängt am selben Übergang (#791). Dieser Weg trägt ihn
-      // dreifach: Checkbox, Swipe und die Sammelaktion gehen alle hier durch.
-      syncTaskCompletion(db.get(), Number(req.params.id), prev.status, status, req.authUserId || req.session.userId);
-
-      // Zurückgenommenes Abhaken macht auch die Folgeinstanz rückgängig (#650).
-      // Sonst stünde die beim Erledigen erzeugte nächste Instanz neben der wieder
-      // geöffneten Aufgabe - die Serie sähe doppelt aus.
-      if (prev.status === 'done' && status !== 'done') {
-        undone = discardRecurrenceFollowup(Number(req.params.id));
-      }
-
-      // Wiederkehrende Aufgabe: nächste Instanz erstellen wenn erledigt
-      if (status === 'done' && prev.status !== 'done') {
-        spawnRecurrenceFollowup(db.get().prepare('SELECT * FROM tasks WHERE id = ?').get(req.params.id));
-      }
-    })();
+    const { pending, undone } = transitionTaskStatus({
+      taskId: Number(req.params.id), status,
+      actingUserId: req.authUserId || req.session.userId,
+    });
 
     res.json({ data: { id: Number(req.params.id), status, archived_at: prev.archived_at } });
 
     if (pending || undone) pushToCalDAV('Statuswechsel');
   } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message, code: err.status });
     log.error('PATCH /:id/status error:', err);
     res.status(500).json({ error: 'Internal server error.', code: 500 });
   }

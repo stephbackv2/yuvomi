@@ -2764,6 +2764,11 @@
         "intervalHint": "Dopo la scelta l’intervallo è liberamente impostabile - ad esempio ogni 2 settimane o ogni 3 mesi."
     },
     "recipes": {
+        "instructionsLabel": "Cooking instructions",
+        "instructionsPlaceholder": "One cooking step per line",
+        "originalQuantities": "Original recipe quantities",
+        "plannedQuantities": "Planned meal quantities",
+        "fullRecipe": "Open full recipe page",
         "mealTypeNone": "Nessun pasto",
         "toShoppingSuccess_few": "{{count}} ingredienti aggiunti a {{list}}.",
         "planSuccess": "{{name}} pianificato per il {{date}}.",

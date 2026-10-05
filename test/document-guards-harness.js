@@ -152,7 +152,7 @@ function run(cmd, args, env) {
   });
 }
 
-async function waitForHttp(baseUrl, timeoutMs = 30000) {
+async function waitForHttp(baseUrl, timeoutMs = Number(process.env.DOCUMENT_GUARDS_STARTUP_TIMEOUT) || 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -183,7 +183,7 @@ function startServer(dbPath, port) {
       // Hintergrundarbeit aus dem Messfenster halten.
       DISABLE_BACKUP_SCHEDULER: '1',
     },
-    stdio: 'ignore',
+    stdio: process.env.DOCUMENT_GUARDS_DEBUG ? 'inherit' : 'ignore',
   });
   return child;
 }
@@ -239,7 +239,7 @@ async function loginCookies(baseUrl) {
  * Faehrt Server (falls noetig) und Browser hoch.
  * @returns {Promise<{baseUrl: string, browser: import('puppeteer').Browser, close: () => Promise<void>}>}
  */
-export async function startHarness() {
+export async function startHarness({ seed } = {}) {
   const external = process.env.DOCUMENT_GUARDS_BASE_URL;
   let server = null;
   let tmpDir = null;
@@ -255,19 +255,27 @@ export async function startHarness() {
     // eigener Prozess auf derselben Datei - deshalb muss der Server dafuer
     // aus dem Weg sein, statt parallel auf die WAL zu schreiben.
     const migrator = startServer(dbPath, port);
-    await waitForHttp(baseUrl);
-    await stopServer(migrator);
+    try { await waitForHttp(baseUrl); }
+    finally { await stopServer(migrator); }
 
     await run(process.execPath, ['scripts/seed-demo.js', '--db', dbPath, '--locale', 'de']);
+    await seed?.(dbPath);
 
     server = startServer(dbPath, port);
     await waitForHttp(baseUrl);
   }
 
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-dev-shm-usage'],
-  });
+  let browser;
+  try {
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-dev-shm-usage'],
+    });
+  } catch (err) {
+    await stopServer(server);
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
+    throw err;
+  }
 
   // EINMAL anmelden, Cookie an alle Seiten weiterreichen.
   //

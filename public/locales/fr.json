@@ -2764,6 +2764,11 @@
         "intervalHint": "Une fois votre choix fait, l’intervalle se règle librement - toutes les 2 semaines ou tous les 3 mois."
     },
     "recipes": {
+        "instructionsLabel": "Cooking instructions",
+        "instructionsPlaceholder": "One cooking step per line",
+        "originalQuantities": "Original recipe quantities",
+        "plannedQuantities": "Planned meal quantities",
+        "fullRecipe": "Open full recipe page",
         "mealTypeNone": "Aucun repas",
         "toShoppingSuccess_few": "{{count}} ingrédients ajoutés à {{list}}.",
         "planSuccess": "{{name}} planifié pour le {{date}}.",

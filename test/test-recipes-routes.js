@@ -628,3 +628,29 @@ test('POST /recipes: ein Bild, dessen Inhalt nicht zum Typ passt -> 400', async 
   const r = await call('POST', '/', { title: 'Gelogen', image_data: gelogen });
   assert.equal(r.status, 400);
 });
+
+// Ordered instructions remain independent of legacy notes and survive old clients.
+test('recipe instructions round-trip and omitted updates preserve them', async () => {
+  actor = { id: OWNER, role: 'member' };
+  const created = await call('POST', '/', {
+    title: 'Instruction contract', notes: 'Keep covered.',
+    instructions: ['  Mix flour.  ', 'Bake for 20 minutes.'],
+    ingredients: [{ name: 'Flour', quantity: '200 g' }],
+  });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.body.data.instructions, ['Mix flour.', 'Bake for 20 minutes.']);
+  const id = created.body.data.id;
+  const updated = await call('PUT', `/${id}`, { title: 'Updated', notes: 'Legacy client', ingredients: created.body.data.ingredients });
+  assert.deepEqual(updated.body.data.instructions, ['Mix flour.', 'Bake for 20 minutes.']);
+  const list = await call('GET', '/');
+  assert.equal(list.body.data.find((recipe) => recipe.id === id).notes, 'Legacy client');
+  assert.deepEqual(list.body.data.find((recipe) => recipe.id === id).instructions, ['Mix flour.', 'Bake for 20 minutes.']);
+  const cleared = await call('PUT', `/${id}`, { title: 'Updated', instructions: [] });
+  assert.deepEqual(cleared.body.data.instructions, []);
+});
+
+test('invalid recipe instructions are rejected before changing a recipe', async () => {
+  actor = { id: OWNER, role: 'member' };
+  const result = await call('POST', '/', { title: 'Invalid steps', instructions: [{ html: '<script>' }] });
+  assert.equal(result.status, 400);
+});

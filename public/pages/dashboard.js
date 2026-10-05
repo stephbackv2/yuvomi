@@ -10,6 +10,7 @@ import { canSeeWidget, moduleAccess } from '/permissions.js';
 import { t, formatDate, formatTime, timeSuffix, getLocale, getNumberFormat } from '/i18n.js';
 import { getReadableTextColor, AVATAR_FALLBACK_COLOR } from '/utils/color.js';
 import { resolveEventColor } from '/utils/event-color.js';
+import { renderEventAssigneeBar } from '/components/event-assignees.js';
 import { esc, fmtLocation, renderMarkdownLight } from '/utils/html.js';
 // `todayKey` heisst hier schon ein Parameter (bzw. eine lokale Bindung), der den
 // Bezugstag traegt - der Import kommt deshalb unter eigenem Namen herein.
@@ -880,6 +881,7 @@ function buildTodayProgram(data, { includeTasks = true, includeCalendar = true, 
         tone: 'event',
         route: calendarEventRoute(event),
         who: event.assigned_users?.[0] ?? null,
+        event,
       });
     }
   }
@@ -1020,10 +1022,7 @@ function renderUpcomingEvents(events) {
     const timeStr = e.all_day ? t('dashboard.allDay') : `${formatTime(d)}${_suffix ? ' ' + _suffix : ''}`.trim();
     return `
       <div class="event-item" data-route="${esc(calendarEventRoute(e))}" role="button" tabindex="0">
-        <!-- Dieselbe Regel wie im Kalender, aus derselben Datei. Hier stand
-             e.color || e.cal_color - dieselbe Frage ohne den Zweig fuer die
-             zugewiesene Person, was seit #891 zwei verschiedene Antworten
-             gegeben haette. -->
+        ${renderEventAssigneeBar(e)}
         <div class="event-item__bar" style="background-color:${esc(resolveEventColor(e))}"></div>
         <div class="event-item__content">
           <div class="event-item__title">${esc(e.title)}</div>
@@ -1172,12 +1171,13 @@ function renderCountdowns(allItems, size, total = null) {
       : ` data-route="/calendar?open=${encodeURIComponent(String(c.id))}&date=${encodeURIComponent(c.date)}"`;
     return `
       <div class="countdown-item" role="button" tabindex="0"${anchor}${accent}>
+        ${c.source === 'event' ? renderEventAssigneeBar(c) : ''}
         <span class="countdown-item__icon" aria-hidden="true">
           <i data-lucide="${esc(c.icon || 'calendar')}"></i>
         </span>
         <div class="countdown-item__body">
           <div class="countdown-item__title">${esc(c.title)}</div>
-          <div class="countdown-item__meta">${formatDate(c.date)}</div>
+          <div class="countdown-item__meta">${formatDate(c.date)}${c.source === 'event' ? renderAvatarStack(c.assigned_users ?? [], { size: 20 }) : ''}</div>
         </div>
         <div class="countdown-item__days countdown-item__days--${countdownRank(c.days_until)}">${esc(label)}</div>
       </div>
@@ -2212,14 +2212,16 @@ function renderTodayRow(row) {
   // Titel in Textfarbe, das Modul-Label lebt als ruhiger Untertitel weiter
   // (nie versal, nie ueber dem Titel).
   const inner = `
+      ${row.event ? renderEventAssigneeBar(row.event) : ''}
       <span class="${mark ? 'seal-pair' : ''}"><span class="module-seal today-cockpit-card__icon">${moduleIconHTML(row.icon)}</span>${mark}</span>
       <span class="today-cockpit-card__body">
         <strong class="today-cockpit-card__value">${esc(row.title)}</strong>
         <span class="today-cockpit-card__sub">${esc(row.sub)}</span>
       </span>
       ${time}
+      ${row.event ? renderAvatarStack(row.event.assigned_users ?? [], { size: 20 }) : ''}
   `;
-  const attrs = `class="today-cockpit-card today-cockpit-card--${row.tone}" data-route="${esc(row.route)}"${objectAttrs}`;
+  const attrs = `class="today-cockpit-card today-cockpit-card--${row.tone}" data-route="${esc(row.route)}"${objectAttrs}${row.event ? ` style="--seal-accent:${esc(resolveEventColor(row.event))}"` : ''}`;
   return opensModal
     ? `<button type="button" ${attrs}>${inner}</button>`
     : `<a href="${esc(row.route)}" ${attrs}>${inner}</a>`;
@@ -3453,11 +3455,13 @@ function renderWallRow(row) {
     ? `<span class="wall-row__time${row.overdue ? ' wall-row__time--overdue' : ''}">${esc(row.timeLabel)}</span>`
     : '';
   return `
-    <li class="wall-row wall-row--${esc(row.tone)}">
+    <li class="wall-row wall-row--${esc(row.tone)}"${row.event ? ` style="--wall-row-accent:${esc(resolveEventColor(row.event))}"` : ''}>
+      ${row.event ? renderEventAssigneeBar(row.event) : ''}
       <span class="module-seal wall-row__seal">${moduleIconHTML(row.icon)}</span>
       <span class="wall-row__body">
         <span class="wall-row__title">${esc(row.title)}</span>
         <span class="wall-row__sub">${esc(row.sub)}</span>
+        ${row.event ? renderAvatarStack(row.event.assigned_users ?? [], { size: 20 }) : ''}
       </span>
       ${time}
     </li>`;

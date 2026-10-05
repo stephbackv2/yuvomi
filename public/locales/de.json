@@ -2867,6 +2867,11 @@
         "importSelected": "{{count}} Kontakte ausgewählt"
     },
     "recipes": {
+        "instructionsLabel": "Zubereitung",
+        "instructionsPlaceholder": "Ein Zubereitungsschritt pro Zeile",
+        "originalQuantities": "Originalmengen des Rezepts",
+        "plannedQuantities": "Geplante Mengen der Mahlzeit",
+        "fullRecipe": "Vollständiges Rezept öffnen",
         "mealTypeNone": "Keine Mahlzeit",
         "toShoppingSuccess_few": "{{count}} Zutaten auf {{list}} übernommen.",
         "planSuccess": "{{name}} für {{date}} eingeplant.",

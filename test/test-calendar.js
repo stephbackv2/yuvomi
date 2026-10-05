@@ -902,75 +902,15 @@ test('Der Marker ist birthday_name, nicht der Titel', () => {
 // Farbhierarchie (#815)
 // --------------------------------------------------------
 
-test('die eigene Terminfarbe schlaegt die Farbe der zugewiesenen Person', () => {
-  // Der belegte Fall aus #815: ein CalDAV-Termin bringt seine RFC-7986-`COLOR`
-  // mit, wird jemandem zugewiesen - und war bis v2.35.0 unsichtbar, weil die
-  // Personenfarbe alles schlug. Die Sync war nie das Problem.
+test('event cards retain explicit and calendar colors independently of assignees', () => {
   const { resolveEventColor } = calendarHelpers;
-  const assignee = [{ id: 1, color: '#FF0000' }];
-
-  assert(resolveEventColor({ color: '#00FF00', assigned_users: assignee, cal_color: '#0000FF' }) === '#00FF00',
-    'die ausdrueckliche Terminfarbe muss die Zuweisung schlagen');
-  // Gegenprobe: OHNE eigene Farbe gewinnt die Person weiter - gegen die
-  // Kalenderfarbe, die jeder Termin des Kalenders traegt und die deshalb nichts
-  // ueber diesen einen aussagt. Ohne diese Haelfte waere der Test auch dann
-  // gruen, wenn die Zuweisung gar nicht mehr faerbte.
-  //
-  // DIESE HAELFTE WAR BIS v2.48.0 BLIND, und das ist der Grund, warum sie hier
-  // so ausfuehrlich steht. `calendar_events.color` war NOT NULL und lehnte auch
-  // den Leerstring ab - ein Termin AUS DER DATENBANK konnte die beiden unteren
-  // Zweige nie erreichen, der Test war also gruen ueber totem Code und sagte
-  // nichts darueber, was ein Nutzer zu sehen bekommt (#856).
-  //
-  // Seit Migration 166 darf die Spalte NULL sein, und erst damit traegt diese
-  // Haelfte eine Zusicherung. Dass ein NULL auch wirklich aus der Route und aus
-  // dem Sync herauskommt, kann dieser Frontend-Test aber nicht zeigen - das
-  // pruefen `test:calendar-routes` (Route) und `test:calendar-inherited-color`
-  // (Migration + Importpfade). Ohne die beiden waere er wieder blind.
-  assert(resolveEventColor({ assigned_users: assignee, cal_color: '#0000FF' }) === '#FF0000',
-    'ohne eigene Farbe muss die Zuweisung faerben');
-  assert(resolveEventColor({ cal_color: '#0000FF' }) === '#0000FF',
-    'ohne Zuweisung bleibt die Kalenderfarbe');
-  assert(resolveEventColor({}) === '#8E8E93',
-    'ohne alles bleibt das neutrale Grau');
-});
-
-test('die geerbte Farbe gehoert der PRIMAEREN Zuweisung, nicht der ersten Zeile', () => {
-  // `assigned_users` kommt aus einem `json_group_array` OHNE `ORDER BY`: seine
-  // Reihenfolge ist die der `event_assignments`-Zeilen, nicht die des Formulars.
-  // Die primaere Zuweisung steht ausdruecklich in `assigned_to`. Ohne die
-  // Unterscheidung traegt ein Termin mit mehreren Zugewiesenen die Farbe eines
-  // ANDEREN Mitglieds - und kann sie beim Neuladen wechseln, ohne dass jemand
-  // etwas geaendert hat. Solange die Spalte NOT NULL war, war der Zweig tot und
-  // der Fehler unsichtbar (#891).
-  const { resolveEventColor } = calendarHelpers;
-  const ev = {
-    color: null,
-    assigned_to: 7,
-    assigned_users: [{ id: 3, color: '#3CA368' }, { id: 7, color: '#CE5053' }],
-  };
-  assert(resolveEventColor(ev) === '#CE5053',
-    'die Farbe muss der in assigned_to genannten Person gehoeren');
-
-  // Gegenprobe: die naive Fassung greift daneben - ohne diese Zeile waere der
-  // Test auch dann gruen, wenn beide Personen dieselbe Farbe traegen.
-  assert(ev.assigned_users[0].color === '#3CA368',
-    'die erste Zeile traegt eine ANDERE Farbe - sonst prueft der Test nichts');
-
-  // Faellt assigned_to aus (Altbestand, geloeschtes Mitglied), bleibt die erste
-  // Zeile die beste verfuegbare Auskunft.
-  assert(resolveEventColor({ color: null, assigned_to: null, assigned_users: [{ id: 3, color: '#3CA368' }] }) === '#3CA368',
-    'ohne assigned_to gilt die erste Zeile');
-  assert(resolveEventColor({ color: null, assigned_to: 99, assigned_users: [{ id: 3, color: '#3CA368' }] }) === '#3CA368',
-    'zeigt assigned_to auf niemanden in der Liste, ebenso');
-});
-
-test('eine Zuweisung ohne eigene Farbe faellt nicht auf die Kalenderfarbe durch', () => {
-  // Ein Mitglied ohne gesetzte Avatar-Farbe bekommt das neutrale Grau, nicht die
-  // Kalenderfarbe: sonst saehe ein zugewiesener Termin aus wie ein nicht
-  // zugewiesener, und die Zuweisung waere unsichtbar statt nur farblos.
-  assert(calendarHelpers.resolveEventColor({ assigned_users: [{ id: 1 }], cal_color: '#0000FF' }) === '#8E8E93',
-    'ein Mitglied ohne Farbe darf nicht auf die Kalenderfarbe durchfallen');
+  const assigned_users = [{ id: 7, color: '#CE5053' }, { id: 3, color: '#3CA368' }];
+  assert(resolveEventColor({ color: '#00FF00', cal_color: '#0000FF', assigned_users }) === '#00FF00');
+  assert(resolveEventColor({ color: null, cal_color: '#0000FF', assigned_users }) === '#0000FF');
+  assert(resolveEventColor({ cal_color: '#0000FF', assigned_users: [{ id: 1 }] }) === '#0000FF');
+  assert(resolveEventColor({ assigned_users }) === '#8E8E93');
+  assert(resolveEventColor({ cal_color: '#0000FF' }) === '#0000FF');
+  assert(resolveEventColor({}) === '#8E8E93');
 });
 
 // --------------------------------------------------------

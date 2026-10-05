@@ -15,6 +15,7 @@ export function recipesPaths() {
       }),
     },
     '/api/v1/recipes/{id}': {
+      get: op({ summary: 'Read recipe ingredients and ordered cooking instructions', tag: 'Recipes', params: [idParam()] }),
       put: op({ summary: 'Update recipe', tag: 'Recipes', params: [idParam()], stateChanging: true, requestBody: jsonBody(null) }),
       delete: op({ summary: 'Delete recipe', tag: 'Recipes', params: [idParam()], stateChanging: true }),
     },

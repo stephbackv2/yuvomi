@@ -304,26 +304,13 @@ function eventCountdowns(d, userId, todayKey, graceDays) {
            -- diesem Kommentar - er steht in einem Template-Literal.)
            e.tzid,
            e.assigned_to,
-           -- Die geliehene Farbe braucht dieselben drei Quellen wie im Kalender
-           -- (#891). Hier reicht EINE Person statt des ganzen Avatar-Stacks: die
-           -- Kachel zeigt eine Kante, keine Personenliste.
-           --
-           -- Der COALESCE ist der Fall "primaeres Mitglied geloescht": dann
-           -- setzt der Fremdschluessel assigned_to auf NULL und nimmt dessen
-           -- Zuweisungszeile mit, waehrend die uebrigen Zugewiesenen bleiben.
-           -- Der Kalender faellt dort auf den ersten verbliebenen zurueck
-           -- (assignees.find(...) ?? assignees[0]); ohne dieselbe Ruecknahme
-           -- zeigte die Kachel als einzige Stelle den Modulton.
-           COALESCE(u.avatar_color, (
-             SELECT u2.avatar_color FROM event_assignments ea
-             JOIN users u2 ON u2.id = ea.user_id
-             WHERE ea.event_id = e.id
-             ORDER BY ea.user_id
-             LIMIT 1
-           )) AS assigned_color,
+           (SELECT json_group_array(json_object(
+             'id', u2.id, 'display_name', u2.display_name, 'color', u2.avatar_color,
+             'avatar_data', u2.avatar_data
+           )) FROM event_assignments ea JOIN users u2 ON u2.id = ea.user_id
+             WHERE ea.event_id = e.id) AS assigned_users_json,
            COALESCE(ec.color, isub.color) AS cal_color
     FROM calendar_events e
-    LEFT JOIN users u ON u.id = e.assigned_to
     LEFT JOIN external_calendars ec ON ec.id = e.calendar_ref_id
     LEFT JOIN ics_subscriptions isub ON isub.id = e.subscription_id
     WHERE e.countdown = 1
@@ -353,16 +340,8 @@ function eventCountdowns(d, userId, todayKey, graceDays) {
       date,
       days_until: days,
       icon: row.icon || 'calendar',
-      // Nicht `row.color`: ein Termin darf seit #891 ohne eigene Farbe sein und
-      // leiht sich dann die der zugewiesenen Person. Ohne diesen Schritt faellt
-      // genau so ein Termin auf den Modulton zurueck - er saehe hier farblos
-      // aus und im Kalender daneben in der Farbe der Person.
-      color: resolveEventColorOrNull({
-        color: row.color,
-        assigned_to: row.assigned_to,
-        assigned_users: row.assigned_color ? [{ id: row.assigned_to, color: row.assigned_color }] : [],
-        cal_color: row.cal_color,
-      }),
+      color: resolveEventColorOrNull(row),
+      assigned_users: JSON.parse(row.assigned_users_json || '[]'),
       recurring: Boolean(row.recurrence_rule),
     });
   }

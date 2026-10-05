@@ -2764,6 +2764,11 @@
         "intervalHint": "Tras elegir una, el intervalo se ajusta libremente - por ejemplo, cada 2 semanas o cada 3 meses."
     },
     "recipes": {
+        "instructionsLabel": "Cooking instructions",
+        "instructionsPlaceholder": "One cooking step per line",
+        "originalQuantities": "Original recipe quantities",
+        "plannedQuantities": "Planned meal quantities",
+        "fullRecipe": "Open full recipe page",
         "mealTypeNone": "Sin comida",
         "toShoppingSuccess_few": "{{count}} ingredientes añadidos a {{list}}.",
         "planSuccess": "{{name}} planificado para el {{date}}.",

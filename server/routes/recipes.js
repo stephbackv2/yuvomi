@@ -36,6 +36,7 @@ function withSource(recipe) {
   const { image_data, ...rest } = recipe;
   return {
     ...rest,
+    instructions: JSON.parse(recipe.instructions || '[]'),
     has_own_image: !!image_data,
     source: recipe.provider_account_id ? recipe.provider_type : 'native',
   };
@@ -85,6 +86,17 @@ router.post('/import/preview', async (req, res) => {
       reason: err.code || 'FETCH_FAILED',
       code: status,
     });
+  }
+});
+
+router.get('/:id', (req, res) => {
+  try {
+    const recipe = loadRecipeWithIngredients(Number(req.params.id));
+    if (!recipe) return res.status(404).json({ error: 'Recipe not found', code: 404 });
+    res.json({ data: recipe });
+  } catch (err) {
+    log.error('GET /:id error:', err);
+    res.status(500).json({ error: 'Internal error', code: 500 });
   }
 });
 
@@ -152,25 +164,39 @@ function validateRecipeImage(val) {
   return { value: s, error: null };
 }
 
+/** Native instructions are ordered plain text; legacy notes keep their meaning. */
+function validateInstructions(value) {
+  if (value == null) return { value: '[]', error: null };
+  if (!Array.isArray(value) || value.length > 100 || value.some((step) => typeof step !== 'string')) {
+    return { value: null, error: 'Instructions must be an array of at most 100 text steps.' };
+  }
+  const steps = value.map((step) => step.trim()).filter(Boolean);
+  if (steps.some((step) => step.length > MAX_TEXT) || steps.join('').length > 50000) {
+    return { value: null, error: 'Cooking instructions are too long.' };
+  }
+  return { value: JSON.stringify(steps), error: null };
+}
+
 router.post('/', (req, res) => {
   try {
     const { ingredients = [] } = req.body;
 
     const vTitle = str(req.body.title, 'Titel', { max: MAX_TITLE });
+    const vInstructions = validateInstructions(req.body.instructions);
     const vNotes = str(req.body.notes, 'Notizen', { max: MAX_TEXT, required: false });
     const vRecipeUrl = str(req.body.recipe_url, 'Rezept-URL', { max: MAX_TEXT, required: false });
     const mealTypes = normalizeRecipeMealTypes(req.body.meal_types);
 
     const vImage = validateRecipeImage(req.body.image_data);
-    const errors = collectErrors([vTitle, vNotes, vRecipeUrl, vImage]);
+    const errors = collectErrors([vTitle, vNotes, vRecipeUrl, vImage, vInstructions]);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
 
     const recipeId = db.transaction(() => {
       const result = db.get().prepare(`
-        INSERT INTO recipes (title, notes, recipe_url, meal_types, image_data, created_by)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO recipes (title, notes, recipe_url, meal_types, image_data, created_by, instructions)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(vTitle.value, vNotes.value, vRecipeUrl.value, mealTypes.join(','),
-        vImage.value ?? null, req.authUserId || req.session.userId);
+        vImage.value ?? null, req.authUserId || req.session.userId, vInstructions.value);
 
       const rid = Number(result.lastInsertRowid);
       const insertIng = db.get().prepare(`
@@ -213,6 +239,7 @@ router.put('/:id', (req, res) => {
     const { ingredients = [] } = req.body;
 
     const vTitle = str(req.body.title, 'Titel', { max: MAX_TITLE });
+    const vInstructions = validateInstructions(req.body.instructions);
     const vNotes = str(req.body.notes, 'Notizen', { max: MAX_TEXT, required: false });
     const vRecipeUrl = str(req.body.recipe_url, 'Rezept-URL', { max: MAX_TEXT, required: false });
     // Fehlt das Feld, bleibt die gespeicherte Auswahl stehen - ein Teil-Update
@@ -223,7 +250,7 @@ router.put('/:id', (req, res) => {
       req.body.meal_types === undefined ? existing.meal_types : req.body.meal_types
     );
     const vImage = validateRecipeImage(req.body.image_data);
-    const errors = collectErrors([vTitle, vNotes, vRecipeUrl, vImage]);
+    const errors = collectErrors([vTitle, vNotes, vRecipeUrl, vImage, vInstructions]);
     if (errors.length) return res.status(400).json({ error: errors.join(' '), code: 400 });
 
     db.transaction(() => {
@@ -234,10 +261,12 @@ router.put('/:id', (req, res) => {
       db.get().prepare(`
         UPDATE recipes
         SET title = ?, notes = ?, recipe_url = ?, meal_types = ?,
-            image_data = CASE WHEN ? = 1 THEN ? ELSE image_data END
+            image_data = CASE WHEN ? = 1 THEN ? ELSE image_data END,
+            instructions = CASE WHEN ? = 1 THEN ? ELSE instructions END
         WHERE id = ?
       `).run(vTitle.value, vNotes.value, vRecipeUrl.value, mealTypes.join(','),
-        vImage.value === undefined ? 0 : 1, vImage.value ?? null, id);
+        vImage.value === undefined ? 0 : 1, vImage.value ?? null,
+        req.body.instructions === undefined ? 0 : 1, vInstructions.value, id);
 
       db.get().prepare('DELETE FROM recipe_ingredients WHERE recipe_id = ?').run(id);
 

@@ -5,6 +5,7 @@
  */
 
 import { api } from '/api.js';
+import { openRecipeReader } from '/components/recipe-reader.js';
 import { openModal as openSharedModal, closeModal as closeSharedModal, selectModal, confirmModal, advancedSection, wireBlurValidation, reportFieldError, refocusAfterRender } from '/components/modal.js';
 import { stagger, scheduleUndoableDelete, wireScrollFade } from '/utils/ux.js';
 import { t, formatDate, formatDayMonth, formatDateInput, parseDateInput, isDateInputValid } from '/i18n.js';
@@ -534,6 +535,8 @@ function renderRecipeSidebar() {
     const card = document.createElement('article');
     card.className = 'recipe-sidebar__card';
     card.draggable = true;
+    card.tabIndex = 0;
+    card.setAttribute('role', 'button');
     card.dataset.recipeId = String(recipe.id);
 
     const titleEl = document.createElement('div');
@@ -648,7 +651,7 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
     return `
       <div class="meal-card" data-meal-id="${meal.id}">
         <button type="button" class="meal-card__open${(meal.recipe_has_own_image || meal.recipe_has_image) ? ' meal-card__open--with-thumb' : ''}"
-           data-action="edit-meal"
+           data-action="read-meal"
            data-meal-id="${meal.id}">
           ${(meal.recipe_has_own_image || meal.recipe_has_image) ? recipeThumbHtml({
             recipeId: meal.recipe_id,
@@ -662,6 +665,8 @@ function renderSlot(date, type, mealsForDay, dayCol, typeRow) {
           </span>` : ''}
         </button>
         <div class="meal-card__actions">
+          <button type="button" class="meal-card__action-btn" data-action="edit-meal" data-meal-id="${meal.id}"
+            aria-label="${esc(t('meals.editMeal'))}"><i data-lucide="pencil" class="icon-sm" aria-hidden="true"></i></button>
           ${meal.recipe_id && recipesReachable() ? `<a class="meal-card__action-btn meal-card__action-btn--recipe"
             data-action="open-linked-recipe"
             href="/recipes?open=${encodeURIComponent(meal.recipe_id)}"
@@ -777,6 +782,12 @@ function wireGrid(grid) {
       return;
     }
 
+    if (action === 'read-meal') {
+      const meal = state.meals.find((entry) => entry.id === Number(btn.dataset.mealId));
+      if (meal) await readPlannerRecipe(meal.recipe_id, { meal, trigger: btn });
+      return;
+    }
+
     if (action === 'edit-meal') {
       const mealId = parseInt(btn.dataset.mealId, 10);
       const meal   = state.meals.find((m) => m.id === mealId);
@@ -833,9 +844,25 @@ function wireRecipeSidebar() {
   if (!sidebar || sidebar.dataset.eventsWired) return;
   sidebar.dataset.eventsWired = 'true';
 
+  let suppressClick = false;
+  const activate = (event) => {
+    const card = event.target.closest('.recipe-sidebar__card');
+    if (!card || suppressClick) return;
+    readPlannerRecipe(Number(card.dataset.recipeId), { trigger: card });
+  };
+  sidebar.addEventListener('click', activate);
+  sidebar.addEventListener('keydown', (event) => {
+    suppressClick = false;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    activate(event);
+  });
+  sidebar.addEventListener('pointerdown', () => { suppressClick = false; });
+
   sidebar.addEventListener('dragstart', (e) => {
     const card = e.target.closest('.recipe-sidebar__card');
     if (!card) return;
+    suppressClick = true;
     _dragRecipeId = Number(card.dataset.recipeId);
     card.classList.add('recipe-sidebar__card--dragging');
     e.dataTransfer.effectAllowed = 'copy';
@@ -847,6 +874,27 @@ function wireRecipeSidebar() {
     _dragRecipeId = null;
     clearRecipeDropTargets();
   });
+}
+
+let _recipeReadRequest = 0;
+
+async function readPlannerRecipe(recipeId, { meal = null, trigger } = {}) {
+  const request = ++_recipeReadRequest;
+  const container = _container;
+  const editMeal = () => {
+    if (meal) openMealModal({ mode: 'edit', meal, date: meal.date, mealType: meal.meal_type });
+  };
+  if (!recipeId || !recipesReachable()) { editMeal(); return; }
+  try {
+    const { data: recipe } = await api.get(`/recipes/${recipeId}`);
+    if (request !== _recipeReadRequest || container !== _container || !container?.isConnected) return;
+    trigger?.focus({ preventScroll: true });
+    openRecipeReader(recipe, { meal });
+  } catch (err) {
+    if (request !== _recipeReadRequest || container !== _container || !container?.isConnected) return;
+    if (meal) editMeal();
+    else window.yuvomi?.showToast(err.data?.error ?? t('common.errorGeneric'), 'danger');
+  }
 }
 
 function clearRecipeDropTargets() {

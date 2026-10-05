@@ -1,0 +1,9 @@
+.recipe-reader { display: grid; gap: var(--space-4); }
+.recipe-reader h3 { margin-block-end: var(--space-2); }
+.recipe-reader ul, .recipe-reader ol { padding-inline-start: var(--space-6); }
+.recipe-reader li { margin-block-end: var(--space-2); white-space: pre-wrap; overflow-wrap: anywhere; }
+.recipe-reader__quantities { color: var(--color-text-secondary); }
+.recipe-reader__notes { white-space: pre-wrap; overflow-wrap: anywhere; }
+.recipe-reader__image { display: block; }
+.recipe-reader__image-img { display: block; max-width: 100%; max-height: 40vh; object-fit: contain; border-radius: var(--radius-md); }
+.recipe-reader__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }

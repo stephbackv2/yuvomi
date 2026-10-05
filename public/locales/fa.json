@@ -2867,6 +2867,11 @@
         "importSelected": "{{count}} مخاطب انتخاب شد"
     },
     "recipes": {
+        "instructionsLabel": "Cooking instructions",
+        "instructionsPlaceholder": "One cooking step per line",
+        "originalQuantities": "Original recipe quantities",
+        "plannedQuantities": "Planned meal quantities",
+        "fullRecipe": "Open full recipe page",
         "mealTypeNone": "بدون وعده",
         "toShoppingSuccess_few": "{{count}} ماده به {{list}} اضافه شد.",
         "planSuccess": "{{name}} برای {{date}} برنامه‌ریزی شد.",

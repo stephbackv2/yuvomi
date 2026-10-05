@@ -10,7 +10,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import Database from 'better-sqlite3-multiple-ciphers';
-import { MIGRATIONS, _setTestDatabase } from '../server/db.js';
+process.env.DB_PATH = ':memory:';
+const { MIGRATIONS, _setTestDatabase } = await import('../server/db.js');
 import {
   completionFeed, recordCompletion, revokeCompletion, seriesHistory, seriesRootOf, syncTaskCompletion,
 } from '../server/services/task-completions.js';

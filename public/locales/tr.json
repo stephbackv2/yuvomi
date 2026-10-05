@@ -2764,6 +2764,11 @@
         "intervalHint": "Seçtikten sonra aralığı istediğin gibi ayarlayabilirsin - örneğin her 2 haftada bir veya her 3 ayda bir."
     },
     "recipes": {
+        "instructionsLabel": "Cooking instructions",
+        "instructionsPlaceholder": "One cooking step per line",
+        "originalQuantities": "Original recipe quantities",
+        "plannedQuantities": "Planned meal quantities",
+        "fullRecipe": "Open full recipe page",
         "mealTypeNone": "Öğün yok",
         "toShoppingSuccess_few": "{{list}} listesine {{count}} malzeme eklendi.",
         "planSuccess": "{{name}}, {{date}} için planlandı.",

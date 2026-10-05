@@ -874,7 +874,7 @@ test('POST: erledigt angelegte Serie legt die nächste Instanz nach', async () =
   const r = await call('POST', '/', {
     as: admin,
     body: {
-      title: marker, status: 'done', due_date: '2026-09-07',
+      title: marker, status: 'done', due_date: '2090-09-04',
       is_recurring: 1, recurrence_rule: 'FREQ=WEEKLY;BYDAY=MO',
     },
   });
@@ -885,7 +885,7 @@ test('POST: erledigt angelegte Serie legt die nächste Instanz nach', async () =
   assert.equal(rows.length, 2, 'erledigte Instanz plus Nachfolger');
   assert.equal(rows[0].status, 'done');
   assert.equal(rows[1].status, 'open');
-  assert.equal(rows[1].due_date, '2026-09-14', 'der Nachfolger steht eine Woche später');
+  assert.equal(rows[1].due_date, '2090-09-11', 'der Nachfolger steht eine Woche später');
 });
 
 test('POST: status=archived legt nicht ab, sondern fällt auf den ersten Status', async () => {
@@ -1040,4 +1040,54 @@ test('PUT: die Wiederholung laesst sich einschalten, auch ohne Nachfolger', asyn
   const ok = await call('PUT', `/${id}`, { as: admin, body: { is_recurring: 1 } });
   assert.equal(ok.status, 200, `erwartet 200, bekommen ${ok.status}`);
   assert.equal(ok.body.data.due_date, '2026-01-15', 'und das Datum bleibt stehen');
+});
+
+// Every parent completion entry point shares actor attribution and undo behavior.
+test('creation, full updates and status actions share idempotent completion history', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  for (const entry of ['create', 'update', 'status']) {
+    const created = await call('POST', '/', { as: admin, body: {
+      title: `Transition ${entry}`, status: entry === 'create' ? 'done' : 'open',
+      is_recurring: true, recurrence_rule: 'FREQ=WEEKLY', due_date: '2090-01-01',
+    } });
+    assert.equal(created.status, 201);
+    const id = created.body.data.id;
+    if (entry === 'update') await call('PUT', `/${id}`, { as: admin, body: { title: `Transition ${entry}`, status: 'done' } });
+    if (entry === 'status') await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'done' } });
+    await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'done' } });
+    const history = await call('GET', `/${id}/completions`, { as: admin });
+    assert.equal(history.body.data.length, 1);
+    assert.equal(history.body.data[0].user_id, ALICE);
+    const list = await call('GET', '/?include_future=1&include_archived=1', { as: admin });
+    assert.equal(list.body.data.filter((task) => task.recurrence_origin_id === id && !task.parent_task_id).length, 1);
+    await call('PUT', `/${id}`, { as: admin, body: { title: `Transition ${entry}`, status: 'open' } });
+    await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'open' } });
+    assert.deepEqual((await call('GET', `/${id}/completions`, { as: admin })).body.data, []);
+    const reopened = await call('GET', '/?include_future=1&include_archived=1', { as: admin });
+    assert.equal(reopened.body.data.filter((task) => task.recurrence_origin_id === id && !task.parent_task_id).length, 0);
+  }
+});
+
+test('reopening preserves a generated successor after its definition is edited', async () => {
+  const admin = { id: ALICE, role: 'admin' };
+  const created = await call('POST', '/', { as: admin, body: {
+    title: 'Preserve edited successor', status: 'done',
+    is_recurring: true, recurrence_rule: 'FREQ=WEEKLY', due_date: '2090-01-01',
+  } });
+  const id = created.body.data.id;
+  const list = await call('GET', '/?include_future=1', { as: admin });
+  const successor = list.body.data.find((task) => task.recurrence_origin_id === id && !task.parent_task_id);
+  assert.ok(successor);
+  const edited = await call('PUT', `/${successor.id}`, { as: admin, body: { title: 'Someone changed this' } });
+  assert.equal(edited.status, 200);
+  await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'open' } });
+  const after = await call('GET', '/?include_future=1', { as: admin });
+  assert.equal(after.body.data.find((task) => task.id === successor.id)?.title, 'Someone changed this');
+});
+
+
+test('status commands cannot change a task hidden from the actor', async () => {
+  const created = await call('POST', '/', { as: { id: ALICE, role: 'admin' }, body: { title: 'Private transition', visibility: 'private' } });
+  const result = await call('PATCH', `/${created.body.data.id}/status`, { as: { id: BOB, role: 'member' }, body: { status: 'done' } });
+  assert.equal(result.status, 404);
 });
