@@ -236,15 +236,15 @@ test('planner recipe reading preserves quantities, actions, keyboard focus, drag
     });
     assert.equal(await page.$('.recipe-reader'), null);
     await page.click(`.meal-card[data-meal-id="${planned.id}"] [data-action="edit-meal"]`);
-    await page.waitForSelector('#meal-title');
+    await page.waitForSelector('#modal-title');
     await closeReader(page);
     await page.click(button(unlinked.id));
-    await page.waitForSelector('#meal-title');
+    await page.waitForSelector('#modal-title');
     await closeReader(page);
     await page.click(`.meal-card[data-meal-id="${unlinked.id}"] [data-action="delete-meal"]`);
     await page.waitForSelector(`.meal-card[data-meal-id="${unlinked.id}"]`, { hidden: true });
     await page.click(`.meal-card[data-meal-id="${planned.id}"] [data-action="transfer-meal"]`);
-    const lists = (await request(page, 'get', '/shopping/lists')).data;
+    const lists = (await request(page, 'get', '/shopping')).data;
     if (lists.length > 1) {
       await page.waitForSelector('#select-modal-input');
       await page.click('#select-modal-ok');

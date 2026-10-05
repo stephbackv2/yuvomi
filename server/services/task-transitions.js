@@ -146,6 +146,9 @@ function generatedDefinitionHash(taskId) {
     documents: db.get().prepare('SELECT document_id FROM task_documents WHERE task_id = ? ORDER BY document_id')
       .all(task.id).map((row) => row.document_id),
     comments: db.get().prepare('SELECT id, user_id, comment FROM task_comments WHERE task_id = ? ORDER BY id').all(task.id),
+    // User configuration counts as work; delivery/dismissal metadata does not.
+    reminders: db.get().prepare(`SELECT id, created_by, remind_at FROM reminders
+      WHERE entity_type = 'task' AND entity_id = ? ORDER BY id`).all(task.id),
   }));
   return createHash('sha256').update(JSON.stringify(definition)).digest('hex');
 }
@@ -165,7 +168,8 @@ function isGeneratedFollowupTouched(followup) {
   if (db.get().prepare(`SELECT 1 FROM tasks t WHERE (t.id = ? OR t.parent_task_id = ?)
     AND (t.target_caldav_account_id IS NOT NULL OR t.target_caldav_list_url IS NOT NULL
       OR EXISTS (SELECT 1 FROM task_documents td WHERE td.task_id = t.id)
-      OR EXISTS (SELECT 1 FROM task_comments tc WHERE tc.task_id = t.id))`).get(followup.id, followup.id)) return true;
+      OR EXISTS (SELECT 1 FROM task_comments tc WHERE tc.task_id = t.id)
+      OR EXISTS (SELECT 1 FROM reminders r WHERE r.entity_type = 'task' AND r.entity_id = t.id))`).get(followup.id, followup.id)) return true;
   const assignmentIds = (id) => db.get().prepare('SELECT user_id FROM task_assignments WHERE task_id = ? ORDER BY user_id')
     .all(id).map((row) => row.user_id);
   if (JSON.stringify(assignmentIds(followup.id)) !== JSON.stringify(assignmentIds(origin.id))

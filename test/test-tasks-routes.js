@@ -22,6 +22,7 @@ process.env.SESSION_SECRET = 'tasks-routes-test-secret';
 
 const { MIGRATIONS, get, _setTestDatabase } = await import('../server/db.js');
 const { default: tasksRouter } = await import('../server/routes/tasks.js');
+const { default: remindersRouter } = await import('../server/routes/reminders.js');
 
 const moduleDatabase = get();
 const db = buildMigratedDatabase(MIGRATIONS);
@@ -74,15 +75,17 @@ app.use((req, _res, next) => {
   next();
 });
 app.use('/api/v1/tasks', tasksRouter);
+app.use('/api/v1/reminders', remindersRouter);
 const server = http.createServer(app);
 await new Promise((r) => server.listen(0, '127.0.0.1', r));
 const base = `http://127.0.0.1:${server.address().port}/api/v1/tasks`;
 
 test.after(() => { server.close(); db.close(); });
 
-async function call(method, path, { as, body } = {}) {
+async function call(method, path, { as, body, module = 'tasks' } = {}) {
   if (as) actor = as;
-  const res = await fetch(`${base}${path}`, {
+  const resourceBase = module === 'reminders' ? new URL('../reminders', `${base}/`).href : base;
+  const res = await fetch(`${resourceBase}${path}`, {
     method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -1086,9 +1089,9 @@ test('reopening preserves a generated successor after its definition is edited',
 });
 
 
-test('reopening preserves generated successors with documents, comments or a chosen sync target', async () => {
+test('reopening preserves generated successors with documents, comments, reminders or a chosen sync target', async () => {
   const admin = { id: ALICE, role: 'admin' };
-  for (const change of ['document', 'comment', 'sync']) {
+  for (const change of ['document', 'comment', 'reminder', 'sync']) {
     const created = await call('POST', '/', { as: admin, body: {
       title: `Preserve successor ${change}`, status: 'done',
       is_recurring: true, recurrence_rule: 'FREQ=WEEKLY', due_date: '2090-01-01',
@@ -1105,6 +1108,10 @@ test('reopening preserves generated successors with documents, comments or a cho
       assert.equal((await call('PUT', `/${successor.id}/documents`, { as: admin, body: { document_ids: [documentId] } })).status, 200);
     } else if (change === 'comment') {
       assert.equal((await call('POST', `/${successor.id}/comments`, { as: admin, body: { comment: 'Please keep these instructions' } })).status, 201);
+    } else if (change === 'reminder') {
+      assert.equal((await call('POST', '/', { as: admin, module: 'reminders', body: {
+        entity_type: 'task', entity_id: successor.id, remind_at: '2090-01-07T09:00:00',
+      } })).status, 201);
     } else {
       const { accountId, url } = seedReminderList();
       assert.equal((await call('PUT', `/${successor.id}`, { as: admin, body: { sync_target: `caldav:${accountId}|${url}` } })).status, 200);
@@ -1112,6 +1119,7 @@ test('reopening preserves generated successors with documents, comments or a cho
     assert.equal((await call('PATCH', `/${id}/status`, { as: admin, body: { status: 'open' } })).status, 200);
     assert.equal((await call('GET', `/${successor.id}`, { as: admin })).status, 200);
     if (change === 'document') assert.equal((await call('GET', `/${successor.id}/documents`, { as: admin })).body.data.length, 1);
+    if (change === 'reminder') assert.equal((await call('GET', `?entity_type=task&entity_id=${successor.id}`, { as: admin, module: 'reminders' })).body.data.remind_at, '2090-01-07T09:00:00');
   }
 });
 
