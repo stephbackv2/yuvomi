@@ -451,3 +451,128 @@ test('Outlook session publishes only to its explicit account, retries once and r
   await outlook.sync({ fetchImpl });
   assert.equal(remote.size, 0);
 });
+
+
+test('session overrides select effective participants without changing parent access or assignments', async () => {
+  const parent = await task({ assigned_to: [users[1], users[0]], visibility: 'assignees' });
+  const session = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  const changed = await call('PUT', `/tasks/${parent.id}/sessions/${session.id}`, {
+    session_assignment_mode: 'override', assigned_to: users[2], assigned_users: [users[2], users[0]],
+  });
+  assert.equal(changed.status, 200, JSON.stringify(changed));
+  assert.equal(changed.data.session_assignment_mode, 'override');
+  assert.equal(changed.data.assigned_to, users[2]);
+  assert.deepEqual(changed.data.assigned_users.map(u => u.id).sort(), [users[0], users[2]].sort());
+  assert.equal((await call('GET', `/tasks/${parent.id}`)).data.assigned_to, users[1]);
+  assert.equal((await call('GET', `/calendar/${session.id}`, null, users[2])).status, 404);
+  assert.equal((await call('GET', `/tasks/${parent.id}/sessions`, null, users[2])).status, 404);
+  assert.equal(changed.data.start_datetime, session.start_datetime);
+  assert.equal(changed.data.target_google_calendar_id, session.target_google_calendar_id);
+});
+
+
+test('task reassignment follows only future unfinished inherited sessions and retains primary identity on unrelated edits', async () => {
+  const parent = await task({ assigned_to: [users[1], users[0]] });
+  const future = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  const past = (await call('POST', `/tasks/${parent.id}/sessions`, { ...interval, start_datetime: '2001-01-01T10:00' })).data;
+  const completed = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  await call('POST', `/tasks/${parent.id}/sessions/${completed.id}/complete`, {});
+  const exception = (await call('POST', `/tasks/${parent.id}/sessions`, { ...interval,
+    session_assignment_mode: 'override', assigned_to: users[0], assigned_users: [users[0]] })).data;
+  assert.equal((await call('PUT', `/tasks/${parent.id}`, { title: 'Keep primary' })).data.assigned_to, users[1]);
+  assert.equal((await call('PUT', `/tasks/${parent.id}`, { assigned_to: [users[2], users[0]] })).status, 200);
+  let sessions = (await call('GET', `/tasks/${parent.id}/sessions`)).data;
+  assert.equal(sessions.find(s => s.id === future.id).assigned_to, users[2]);
+  for (const id of [past.id, completed.id]) {
+    assert.equal(sessions.find(s => s.id === id).assigned_to, users[1]);
+    assert.deepEqual(sessions.find(s => s.id === id).assigned_users.map(u => u.id).sort(), [users[0], users[1]].sort());
+  }
+  assert.equal(sessions.find(s => s.id === exception.id).assigned_to, users[0]);
+  const reset = await call('PUT', `/tasks/${parent.id}/sessions/${exception.id}`, { session_assignment_mode: 'inherited' });
+  assert.equal(reset.status, 200); assert.equal(reset.data.assigned_to, users[2]);
+  assert.equal(reset.data.session_assignment_mode, 'inherited');
+  assert.equal((await call('GET', `/tasks/${parent.id}`)).data.scheduled_work.percentage, 25);
+  assert.equal((await call('PUT', `/tasks/${parent.id}/sessions/${completed.id}`, { session_assignment_mode: 'override', assigned_to: users[2] })).status, 409);
+});
+
+
+test('assignment overrides resolve the effective primary default and approved task moves are atomic', async () => {
+  db.prepare("INSERT OR REPLACE INTO sync_config (key,value) VALUES ('google_refresh_token','fixture')").run();
+  for (const id of ['assignment-a','assignment-b']) db.prepare("INSERT OR IGNORE INTO google_calendar_selection (calendar_id,name,enabled,access_role) VALUES (?,?,1,'writer')").run(id,id);
+  for (const [user, cal] of [[users[1], 'assignment-a'],[users[2], 'assignment-b']]) db.prepare('INSERT OR REPLACE INTO sync_config (key,value) VALUES (?,?)').run(`calendar_default_target:user:${user}`, `google:${cal}`);
+  const parent = await task({ assigned_to: [users[1], users[0]] });
+  const inherited = (await call('POST', `/tasks/${parent.id}/sessions`, { ...interval, publication_target: undefined })).data;
+  const exception = await call('POST', `/tasks/${parent.id}/sessions`, { ...interval, publication_target: undefined,
+    session_assignment_mode: 'override', assigned_to: users[2], assigned_users: [users[2], users[0]] });
+  assert.equal(exception.status, 201, JSON.stringify(exception));
+  assert.equal(exception.data.target_google_calendar_id, 'assignment-b');
+  assert.equal((await call('GET', `/tasks/${parent.id}/session-targets?session_id=${exception.data.id}`)).data.default_target, 'google:assignment-b');
+  assert.equal((await call('GET', `/tasks/${parent.id}/session-targets?assigned_to=${users[2]}`)).data.default_target, 'google:assignment-b');
+  const rejected = await call('PUT', `/tasks/${parent.id}`, { assigned_to: [users[2], users[0]],
+    session_calendar_moves: [{ session_id: inherited.id, publication_target: 'google:missing-calendar' }] });
+  assert.equal(rejected.status, 400);
+  assert.equal((await call('GET', `/tasks/${parent.id}`)).data.assigned_to, users[1]);
+  assert.equal((await call('GET', `/tasks/${parent.id}/sessions`)).data.find(s => s.id === inherited.id).assigned_to, users[1]);
+  const retained = await call('PUT', `/tasks/${parent.id}`, { assigned_to: [users[2], users[0]] });
+  assert.equal(retained.status, 200);
+  let sessions = (await call('GET', `/tasks/${parent.id}/sessions`)).data;
+  assert.equal(sessions.find(s => s.id === inherited.id).target_google_calendar_id, 'assignment-a');
+  assert.equal(sessions.find(s => s.id === exception.data.id).assigned_to, users[2]);
+  const approved = await call('PUT', `/tasks/${parent.id}`, { assigned_to: [users[1], users[0]],
+    session_calendar_moves: [{ session_id: inherited.id, publication_target: 'google:assignment-b' }] });
+  assert.equal(approved.status, 200, JSON.stringify(approved));
+  sessions = (await call('GET', `/tasks/${parent.id}/sessions`)).data;
+  assert.equal(sessions.find(s => s.id === inherited.id).target_google_calendar_id, 'assignment-b');
+  assert.equal(sessions.find(s => s.id === inherited.id).id, inherited.id);
+  const forbidden = await call('PUT', `/tasks/${parent.id}`, { assigned_to: [users[2]],
+    session_calendar_moves: [{ session_id: exception.data.id, publication_target: 'google:assignment-a' }] });
+  assert.equal(forbidden.status, 400);
+});
+
+test('invalid override participants and primary choices reject without changing the session', async () => {
+  const parent = await task({ assigned_to: [users[0]] });
+  const session = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  for (const body of [
+    { session_assignment_mode: 'unknown' },
+    { session_assignment_mode: 'override', assigned_to: users[1], assigned_users: [users[0]] },
+    { session_assignment_mode: 'override', assigned_to: users[1], assigned_users: [users[1], users[1]] },
+    { session_assignment_mode: 'override', assigned_to: 999999 },
+    { session_assignment_mode: 'override', assigned_to: users[1], assigned_users: [] },
+    { session_assignment_mode: 'inherited', assigned_to: users[1] },
+  ]) assert.equal((await call('PUT', `/tasks/${parent.id}/sessions/${session.id}`, body)).status, 400);
+  db.prepare("INSERT INTO access_permissions (subject_type,subject_id,resource_type,resource_key,access) VALUES ('user',?,'module','calendar','none')").run(String(users[2]));
+  try {
+    assert.equal((await call('PUT', `/tasks/${parent.id}/sessions/${session.id}`, { session_assignment_mode: 'override', assigned_to: users[2] })).status, 400);
+    assert.equal((await call('PUT', `/tasks/${parent.id}`, { assigned_to: [users[2]] })).status, 400);
+  } finally { db.prepare("DELETE FROM access_permissions WHERE subject_type = 'user' AND subject_id = ?").run(String(users[2])); }
+  const current = (await call('GET', `/tasks/${parent.id}/sessions`)).data[0];
+  assert.equal(current.session_assignment_mode, 'inherited'); assert.equal(current.assigned_to, users[0]);
+  assert.equal(current.start_datetime, session.start_datetime);
+  assert.equal((await call('GET', `/tasks/${parent.id}`)).data.assigned_to, users[0]);
+});
+
+
+test('editing elapsed inherited work preserves historical participants after parent reassignment', async () => {
+  const parent = await task({ assigned_to: [users[1], users[0]] });
+  const session = (await call('POST', `/tasks/${parent.id}/sessions`, { ...interval, start_datetime: '2001-01-01T10:00' })).data;
+  await call('PUT', `/tasks/${parent.id}`, { assigned_to: [users[2], users[0]] });
+  const edited = await call('PUT', `/tasks/${parent.id}/sessions/${session.id}`, { session_assignment_mode: 'inherited', duration_minutes: 60 });
+  assert.equal(edited.status, 200);
+  assert.equal(edited.data.assigned_to, users[1]);
+  assert.deepEqual(edited.data.assigned_users, session.assigned_users);
+});
+
+
+test('ordinary scheduling self-assignment also updates existing unassigned future inherited plans', async () => {
+  const parent = await task({ assigned_to: [users[1]] });
+  const existing = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  assert.equal((await call('PUT', `/tasks/${parent.id}`, { assigned_to: [] })).status, 200);
+  const unassigned = (await call('GET', `/tasks/${parent.id}/sessions`)).data[0];
+  assert.equal(unassigned.assigned_to, null); assert.deepEqual(unassigned.assigned_users, []);
+  const made = await call('POST', `/tasks/${parent.id}/sessions`, interval);
+  assert.equal(made.status, 201);
+  const current = (await call('GET', `/tasks/${parent.id}/sessions`)).data.find(s => s.id === existing.id);
+  assert.equal(current.assigned_to, users[0]);
+  assert.deepEqual(current.assigned_users.map(u => u.id), [users[0]]);
+  assert.equal(current.id, existing.id); assert.equal(current.start_datetime, existing.start_datetime);
+});

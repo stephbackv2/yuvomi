@@ -2004,7 +2004,7 @@ function ensureCalendarGestureListeners() {
   _calendarGestureListeners = true;
 
   document.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || event.pointerType === 'touch' || event.target.closest?.('[data-session-complete]')) return;
+    if (event.button !== 0 || event.pointerType === 'touch' || event.target.closest?.('[data-session-complete], [data-session-reopen]')) return;
     const element = calendarEventElement(event.target);
     const source = eventFromElement(element);
     if (!element || !source || state.view === 'agenda') return;
@@ -5936,10 +5936,24 @@ function renderTaskPanel() {
 function renderSessionCheckbox(event) {
   if (!event.task_id) return '';
   const disabled = event.session_status === 'completed' || moduleAccess('tasks') !== 'write' || moduleAccess('calendar') !== 'write';
-  return `<input type="checkbox" data-session-complete="${event.id}" aria-label="${esc(t('calendar.sessionComplete'))}" ${event.session_status === 'completed' ? 'checked' : ''} ${disabled ? 'disabled' : ''}>`;
+  return `<input type="checkbox" data-session-complete="${event.id}" aria-label="${esc(t('calendar.sessionComplete'))}" ${event.session_status === 'completed' ? 'checked' : ''} ${disabled ? 'disabled' : ''}>${event.session_status === 'completed' && moduleAccess('tasks') === 'write' && moduleAccess('calendar') === 'write' ? `<button type="button" class="btn btn--secondary" data-session-reopen="${event.id}">${esc(t('calendar.sessionReopen'))}</button>` : ''}`;
 }
 
 function bindSessionCompletion(container, events = state.events) {
+  for (const button of container.querySelectorAll('[data-session-reopen]')) {
+    button.onkeydown = event => event.stopPropagation();
+    button.onclick = async event => {
+      event.stopPropagation();
+      const session = events.find(item => String(item.id) === button.dataset.sessionReopen);
+      if (!session || button.disabled) return;
+      button.disabled = true;
+      try {
+        await api.post(`/tasks/${session.task_id}/sessions/${session.id}/reopen`, {});
+        await loadRange(state.rangeFrom, state.rangeTo); renderView();
+      } catch (error) { button.disabled = false; window.yuvomi?.showToast(error.data?.error || t('calendar.saveError'), 'danger'); }
+    };
+  }
+
   for (const checkbox of container.querySelectorAll('[data-session-complete]')) {
     checkbox.onclick = event => event.stopPropagation();
     checkbox.onkeydown = event => event.stopPropagation();

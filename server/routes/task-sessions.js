@@ -1,5 +1,6 @@
 /** Scheduling boundaries share task visibility and require both module rights. */
 import express from 'express';
+import { reopenTaskSession } from '../services/task-session-reopen.js';
 import { createLogger } from '../logger.js';
 import { taskSessionTargets, completeTaskSession, plannableTasks, readTaskSessions, scheduleTaskSession, updateTaskSession, removeTaskSession, sessionModuleAllowed } from '../services/task-sessions.js';
 import * as db from '../db.js';
@@ -20,7 +21,7 @@ router.get('/plannable', (req, res) => {
   catch (error) { sendError(res, error); }
 });
 router.get('/:id/session-targets', (req, res) => {
-  try { if (allowed(req, res, 'read')) res.json({ data: taskSessionTargets(Number(req.params.id), getUserId(req)) }); }
+  try { if (allowed(req, res, 'read')) res.json({ data: taskSessionTargets(Number(req.params.id), getUserId(req), req.query) }); }
   catch (error) { sendError(res, error); }
 });
 router.get('/:id/sessions', (req, res) => {
@@ -38,6 +39,13 @@ router.post('/:id/sessions/:sessionId/complete', (req, res) => {
   try {
     if (!allowed(req, res, 'write')) return;
     const event = completeTaskSession({ taskId: Number(req.params.id), sessionId: Number(req.params.sessionId), actor: getUserId(req) });
+    res.json({ data: serializeEvent(event, db.get()) });
+  } catch (error) { sendError(res, error); }
+});
+router.post('/:id/sessions/:sessionId/reopen', (req, res) => {
+  try {
+    if (!allowed(req, res, 'write')) return;
+    const event = reopenTaskSession({ taskId: Number(req.params.id), sessionId: Number(req.params.sessionId), actor: getUserId(req) });
     res.json({ data: serializeEvent(event, db.get()) });
   } catch (error) { sendError(res, error); }
 });

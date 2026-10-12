@@ -13,6 +13,8 @@ function seed(path) {
     const actor = db.prepare("SELECT id FROM users WHERE username = 'linda'").get().id;
     const other = db.prepare("SELECT id FROM users WHERE username = 'alex'").get().id;
     fixture.other = other;
+    db.prepare("INSERT OR REPLACE INTO sync_config (key,value) VALUES ('google_refresh_token','browser-fixture'), ('google_readonly','0')").run();
+    db.prepare("INSERT INTO google_calendar_selection (calendar_id,name,enabled,access_role) VALUES ('browser-task-move','Browser task calendar',1,'writer')").run();
     for (const provider of ['mealie', 'tandoor']) {
       const account = db.prepare("INSERT INTO recipe_provider_accounts (name, base_url, api_token, provider, created_by) VALUES (?, ?, 'x', ?, ?)").run(provider, `https://${provider}.example.com`, provider, actor).lastInsertRowid;
       const recipe = db.prepare(`INSERT INTO recipes (title, created_by, provider_account_id, provider_recipe_id, instructions, provider_instructions_version)
@@ -324,4 +326,207 @@ test('agenda checkboxes complete shared sessions and show scheduled work separat
     assert.equal((await request(page, 'get', `/tasks/${parent.id}`)).data.status, 'done');
   } catch (error) { console.error(error); throw error; }
   finally { await harness.close(); }
+});
+
+test('session assignment override retains destinations, cancels coherently, returns to inherited and reopens editable history', async () => {
+  const harness = await startHarness({ seed });
+  try {
+    const page = await openPage(harness, { device: 'desktop', locale: 'en' });
+    await page.setBypassServiceWorker(true);
+    const parent = (await request(page, 'post', '/tasks', { title: 'Assignment browser work' })).data;
+    const original = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: `${today}T10:00`, tzid: 'UTC' })).data;
+    await page.evaluate(() => localStorage.setItem('yuvomi:calendar:view', 'agenda'));
+    await gotoRoute(page, '/calendar');
+    const openEditor = async () => {
+      await page.click(`.agenda-event[data-id="${original.id}"]`);
+      await page.waitForSelector(`[data-session-edit="${original.id}"]`);
+      await page.click(`[data-session-edit="${original.id}"]`);
+      await page.waitForSelector('#task-session-primary');
+      await page.waitForSelector('#task-session-form [type="submit"]:not([disabled])');
+    };
+    await openEditor();
+    await page.select('#task-session-mode', 'override');
+    await page.select('#task-session-primary', String(fixture.other));
+    await page.waitForSelector('#task-session-move-group:not([hidden])');
+    await page.waitForSelector('#task-session-form [type="submit"]:not([disabled])');
+    await page.select('#task-session-move', 'move');
+    await page.waitForSelector('#task-session-target:not([disabled])');
+    assert.equal(await page.$eval('#task-session-target', el => el.value), '', 'no connected default requires an explicit destination');
+    await page.click('#task-session-cancel');
+    await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
+    let current = (await request(page, 'get', `/tasks/${parent.id}/sessions`)).data[0];
+    assert.equal(current.assigned_to, original.assigned_to);
+    assert.equal(current.session_assignment_mode, 'inherited');
+    await openEditor();
+    await page.select('#task-session-mode', 'override');
+    await page.select('#task-session-primary', String(fixture.other));
+    await page.waitForSelector('#task-session-form [type="submit"]:not([disabled])');
+    const saved = page.waitForResponse(res => res.url().endsWith(`/sessions/${original.id}`) && res.request().method() === 'PUT');
+    await page.click('#task-session-form [type="submit"]');
+    const override = await saved;
+    assert.equal(override.status(), 200, await override.text());
+    const payload = JSON.parse(override.request().postData());
+    assert.equal(payload.assigned_to, fixture.other);
+    assert.ok(payload.assigned_users.includes(fixture.other));
+    assert.ok(!Object.hasOwn(payload, 'publication_target'), 'retain omits publication move');
+    await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
+    current = (await request(page, 'get', `/tasks/${parent.id}/sessions`)).data[0];
+    assert.equal(current.session_assignment_mode, 'override');
+    assert.equal(current.assigned_to, fixture.other);
+    assert.equal((await request(page, 'get', `/tasks/${parent.id}`)).data.assigned_to, original.assigned_to);
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.waitForSelector(`.agenda-event[data-id="${original.id}"] .event-assignees__segment`);
+    assert.ok((await page.$$eval(`.agenda-event[data-id="${original.id}"] .event-assignees__segment`, els => els.map(el => el.title))).length >= 1);
+    await openEditor();
+    await page.select('#task-session-mode', 'inherited');
+    await page.waitForSelector('#task-session-form [type="submit"]:not([disabled])');
+    await page.select('#task-session-move', 'move');
+    await page.waitForSelector('#task-session-target:not([disabled])');
+    await page.select('#task-session-target', 'local');
+    const inherited = page.waitForResponse(res => res.url().endsWith(`/sessions/${original.id}`) && res.request().method() === 'PUT');
+    await page.click('#task-session-form [type="submit"]');
+    const inheritedResponse = await inherited;
+    assert.equal(inheritedResponse.status(), 200, await inheritedResponse.text());
+    assert.ok(!Object.hasOwn(JSON.parse(inheritedResponse.request().postData()), 'assigned_to'));
+    assert.equal(JSON.parse(inheritedResponse.request().postData()).publication_target, 'local');
+    await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
+    await request(page, 'post', `/tasks/${parent.id}/sessions/${original.id}/complete`, {});
+    await page.reload({ waitUntil: 'networkidle0' });
+    await page.waitForSelector(`[data-session-reopen="${original.id}"]`);
+    const reopened = page.waitForResponse(res => res.url().endsWith(`/sessions/${original.id}/reopen`) && res.request().method() === 'POST');
+    await page.click(`[data-session-reopen="${original.id}"]`);
+    assert.equal((await reopened).status(), 200);
+    await page.waitForSelector(`[data-session-complete="${original.id}"]:not(:checked):not([disabled])`);
+    assert.equal((await request(page, 'get', `/tasks/${parent.id}`)).data.status, 'in_progress');
+    await openEditor();
+    await page.$eval('#task-session-duration', el => { el.value = '75'; });
+    const edited = page.waitForResponse(res => res.url().endsWith(`/sessions/${original.id}`) && res.request().method() === 'PUT');
+    await page.click('#task-session-form [type="submit"]');
+    assert.equal((await edited).status(), 200);
+    current = (await request(page, 'get', `/tasks/${parent.id}/sessions`)).data[0];
+    assert.equal(current.id, original.id);
+    assert.equal(Date.parse(current.end_datetime) - Date.parse(current.start_datetime), 75 * 60000);
+  } finally { await harness.close(); }
+});
+
+test('task reassignment reviews only future inherited plans and preserves cancelled changes and overrides', async () => {
+  const harness = await startHarness({ seed });
+  try {
+    const page = await openPage(harness, { device: 'desktop', locale: 'en' });
+    await page.setBypassServiceWorker(true);
+    const parent = (await request(page, 'post', '/tasks', { title: 'Future reassignment browser' })).data;
+    const inherited = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: '2090-01-01T10:00', tzid: 'UTC' })).data;
+    const exception = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: '2090-01-02T10:00', tzid: 'UTC', session_assignment_mode: 'override', assigned_to: fixture.other, assigned_users: [fixture.other] })).data;
+    const past = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: '2001-01-01T10:00', tzid: 'UTC' })).data;
+    const edit = async () => {
+      await gotoRoute(page, '/tasks');
+      await page.click(`[data-action="open-task"][data-id="${parent.id}"]`);
+      await page.waitForSelector('#detail-view-edit', { visible: true });
+      await page.click('#detail-view-edit');
+      await page.waitForSelector('#task-form', { visible: true });
+      await page.click('.user-ms__option:has([data-ms-input="task_assigned"].user-ms__none)');
+      await page.click(`.user-ms__option:has([data-ms-input="task_assigned"][value="${fixture.other}"])`);
+    };
+    await edit();
+    await page.click('#task-submit-btn');
+    await page.waitForSelector('[data-session-move-choices]');
+    assert.deepEqual(await page.$$eval('[data-move-session]', rows => rows.map(row => Number(row.dataset.moveSession))), [inherited.id]);
+    await page.select('[data-move-decision]', 'move');
+    assert.equal(await page.$eval('[data-move-target]', el => el.value), '');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay') || document.querySelector('#confirm-modal-ok'));
+    if (await page.$('#confirm-modal-ok')) await page.click('#confirm-modal-ok');
+    await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
+    assert.equal((await request(page, 'get', `/tasks/${parent.id}`)).data.assigned_to, inherited.assigned_to);
+    await edit();
+    await page.click('#task-submit-btn');
+    await page.waitForSelector('[data-session-move-choices]');
+    const save = page.waitForResponse(res => res.url().endsWith(`/tasks/${parent.id}`) && res.request().method() === 'PUT');
+    await page.click('#task-submit-btn');
+    const response = await save;
+    assert.equal(response.status(), 200, await response.text());
+    assert.ok(!Object.hasOwn(JSON.parse(response.request().postData()), 'session_calendar_moves'));
+    await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
+    const sessions = (await request(page, 'get', `/tasks/${parent.id}/sessions`)).data;
+    assert.equal(sessions.find(session => session.id === inherited.id).assigned_to, fixture.other);
+    assert.equal(sessions.find(session => session.id === exception.id).session_assignment_mode, 'override');
+    assert.equal(sessions.find(session => session.id === past.id).assigned_to, past.assigned_to);
+    await gotoRoute(page, '/tasks');
+    await page.click(`[data-action="open-task"][data-id="${parent.id}"]`);
+    await page.waitForSelector('#detail-view-edit', { visible: true });
+    await page.click('#detail-view-edit');
+    await page.waitForSelector('#task-form', { visible: true });
+    await page.click('.user-ms__option:has([data-ms-input="task_assigned"].user-ms__none)');
+    await page.click(`.user-ms__option:has([data-ms-input="task_assigned"][value="${inherited.assigned_to}"])`);
+    await page.click('#task-submit-btn');
+    await page.waitForSelector('[data-session-move-choices]');
+    await page.select('[data-move-decision]', 'move');
+    assert.equal(await page.$eval('[data-move-target]', el => el.value), '', 'no default requires explicit writable choice');
+    await page.select('[data-move-target]', 'google:browser-task-move');
+    const approved = page.waitForResponse(res => res.url().endsWith(`/tasks/${parent.id}`) && res.request().method() === 'PUT');
+    await page.click('#task-submit-btn');
+    const approvedResponse = await approved;
+    assert.equal(approvedResponse.status(), 200, await approvedResponse.text());
+    assert.deepEqual(JSON.parse(approvedResponse.request().postData()).session_calendar_moves, [{ session_id: inherited.id, publication_target: 'google:browser-task-move' }]);
+    await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
+    const published = (await request(page, 'get', `/tasks/${parent.id}/sessions`)).data;
+    assert.equal(published.find(session => session.id === inherited.id).target_google_calendar_id, 'browser-task-move');
+    assert.equal(published.find(session => session.id === exception.id).target_google_calendar_id, null);
+    const users = (await request(page, 'get', '/auth/users')).data;
+    const primary = users[1].id;
+    const ordered = (await request(page, 'post', '/tasks', { title: 'Preserve second DOM primary', assigned_to: [primary, users[0].id] })).data;
+    const allocation = (await request(page, 'post', `/tasks/${ordered.id}/sessions`, { publication_target: 'local', start_datetime: '2090-01-03T10:00', tzid: 'UTC' })).data;
+    await gotoRoute(page, '/tasks');
+    await page.click(`[data-action="open-task"][data-id="${ordered.id}"]`);
+    await page.waitForSelector('#detail-view-edit', { visible: true });
+    await page.click('#detail-view-edit');
+    await page.waitForSelector('#task-form', { visible: true });
+    await page.$eval('#task-form [name="title"]', el => { el.value += ' edited'; });
+    const unrelated = page.waitForResponse(res => res.url().endsWith(`/tasks/${ordered.id}`) && res.request().method() === 'PUT');
+    await page.click('#task-submit-btn');
+    const unrelatedResponse = await unrelated;
+    assert.equal(unrelatedResponse.status(), 200, await unrelatedResponse.text());
+    assert.equal(JSON.parse(unrelatedResponse.request().postData()).assigned_to[0], primary);
+    assert.equal(await page.$('[data-session-move-choices]'), null);
+    assert.equal((await request(page, 'get', `/tasks/${ordered.id}/sessions`)).data.find(session => session.id === allocation.id).assigned_to, primary);
+  } finally { await harness.close(); }
+});
+
+test('existing session can explicitly change destination without reassignment and cancel a failed pending transfer', async () => {
+  const harness = await startHarness({ seed(path) {
+    seed(path);
+    const db = new Database(path);
+    try {
+      const actor = db.prepare("SELECT id FROM users WHERE username='linda'").get().id;
+      db.prepare("INSERT INTO google_calendar_selection (calendar_id,name,enabled,access_role) VALUES ('browser-writable','Browser writable calendar',1,'writer')").run();
+      fixture.pendingTask = Number(db.prepare("INSERT INTO tasks (title,created_by,assigned_to) VALUES ('Failed transfer browser',?,?)").run(actor,actor).lastInsertRowid);
+      db.prepare('INSERT INTO task_assignments (task_id,user_id) VALUES (?,?)').run(fixture.pendingTask,actor);
+      fixture.pendingSession = Number(db.prepare(`INSERT INTO calendar_events (title,start_datetime,end_datetime,tzid,created_by,assigned_to,task_id,session_status,session_assignment_mode,session_pending_target,sync_state,sync_error)
+        VALUES ('Failed transfer browser',?,?,'UTC',?,?,?,'unfinished','inherited',?,'error','Transfer failed')`).run(`${today}T19:00:00Z`,`${today}T19:30:00Z`,actor,actor,fixture.pendingTask,JSON.stringify({target_google_calendar_id:'browser-writable'})).lastInsertRowid);
+      db.prepare('INSERT INTO event_assignments (event_id,user_id) VALUES (?,?)').run(fixture.pendingSession,actor);
+    } finally { db.close(); }
+  } });
+  try {
+    const page = await openPage(harness, { device: 'desktop', locale: 'en' });
+    await page.setBypassServiceWorker(true);
+    await page.evaluate(() => localStorage.setItem('yuvomi:calendar:view', 'agenda'));
+    await gotoRoute(page, '/calendar');
+    await page.click(`.agenda-event[data-id="${fixture.pendingSession}"]`);
+    await page.waitForSelector(`[data-session-edit="${fixture.pendingSession}"]`);
+    await page.click(`[data-session-edit="${fixture.pendingSession}"]`);
+    await page.waitForSelector('#task-session-form [type="submit"]:not([disabled])');
+    await page.select('#task-session-move', 'move');
+    await page.waitForSelector('#task-session-target:not([disabled])');
+    assert.equal(await page.$eval('#task-session-target', el => el.value), 'local', 'original destination can cancel failed transfer');
+    assert.ok(await page.$('#task-session-target option[value="google:browser-writable"]'), 'existing local session can choose a writable external destination');
+    const save = page.waitForResponse(res => res.url().endsWith(`/sessions/${fixture.pendingSession}`) && res.request().method() === 'PUT');
+    await page.click('#task-session-form [type="submit"]');
+    const response = await save;
+    assert.equal(response.status(),200,await response.text());
+    assert.equal(JSON.parse(response.request().postData()).publication_target,'local');
+    const session = (await request(page,'get',`/tasks/${fixture.pendingTask}/sessions`)).data[0];
+    assert.equal(session.id,fixture.pendingSession);
+    assert.equal(session.session_pending_target,null);
+    assert.equal(session.target_google_calendar_id,null);
+  } finally { await harness.close(); }
 });

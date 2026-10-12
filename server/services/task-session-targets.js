@@ -1,5 +1,6 @@
 /** Session publication uses existing provider targets, with assignee-owned defaults. */
 import * as db from '../db.js';
+import { queueSessionPublicationDeletion } from './session-publication.js';
 import { parseSyncTargetValue, googleTargetValue, caldavTargetValue, outlookTargetValue } from '../../public/utils/sync-target.js';
 
 export function sessionTargets(task, actor) {
@@ -41,4 +42,26 @@ export function resolveSessionTarget(task, actor, body) {
     fields.target_outlook_account_id = target.accountId; fields.target_outlook_calendar_id = target.calendarId;
   }
   return fields;
+}
+
+/** Destination changes use the existing durable publication transfer workflow. */
+export function setSessionDestination(before, effectiveTask, actor, body) {
+  const target = resolveSessionTarget(effectiveTask, actor, body);
+  const changed = Object.entries(target).some(([key, value]) => before[key] !== value);
+  if (!changed && before.session_pending_target) {
+    db.get().prepare("UPDATE calendar_events SET session_pending_target = NULL, sync_state = 'clean', sync_error = NULL WHERE id = ?").run(before.id);
+  }
+  if (!changed) return;
+  const published = before.external_source !== 'local' || db.get().prepare('SELECT 1 FROM outlook_event_links WHERE event_id = ?').get(before.id);
+  if (published && Object.values(target).some(Boolean)) {
+    db.get().prepare("UPDATE calendar_events SET session_pending_target = ?, sync_state = 'pending', sync_error = NULL WHERE id = ?").run(JSON.stringify(target), before.id);
+  } else {
+    queueSessionPublicationDeletion(before);
+    db.get().prepare(`UPDATE calendar_events SET external_source = 'local', external_calendar_id = NULL,
+      calendar_ref_id = NULL, external_object_url = NULL, session_pending_target = NULL,
+      target_google_calendar_id = ?, target_caldav_account_id = ?, target_caldav_calendar_url = ?,
+      target_outlook_account_id = ?, target_outlook_calendar_id = ?, outbound_dirty = ?, sync_state = 'clean', sync_error = NULL WHERE id = ?`).run(
+      target.target_google_calendar_id, target.target_caldav_account_id, target.target_caldav_calendar_url,
+      target.target_outlook_account_id, target.target_outlook_calendar_id, Object.values(target).some(Boolean) ? 1 : 0, before.id);
+  }
 }

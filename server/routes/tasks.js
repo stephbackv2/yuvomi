@@ -4,6 +4,8 @@
  * Abhängigkeiten: express, server/db.js
  */
 
+import { followTaskSessionAssignments } from '../services/task-session-assignments.js';
+import { sessionModuleAllowed } from '../services/task-sessions.js';
 import { attachTaskSessionProgress } from '../services/task-session-progress.js';
 import { createLogger } from '../logger.js';
 import express from 'express';
@@ -1078,7 +1080,10 @@ router.put('/:id', (req, res) => {
     const userIds  = req.body.assigned_to !== undefined
       ? parseAssignedTo(req.body.assigned_to)
       : assignedBefore;
-    const firstUid = userIds[0] ?? null;
+    const firstUid = req.body.assigned_to === undefined ? task.assigned_to : userIds[0] ?? null;
+    if (req.body.session_calendar_moves !== undefined && !sessionModuleAllowed(req, 'write')) {
+      return res.status(403).json({ error: 'Task and calendar access required.', code: 403 });
+    }
 
     // Sperre der Aufgabe (#830). Nicht mitgeschickt heisst "nicht angefasst".
     const lockedRequested = req.body.locked !== undefined ? (req.body.locked ? 1 : 0) : null;
@@ -1168,6 +1173,8 @@ router.put('/:id', (req, res) => {
                  is_recurring ? 1 : 0, recurrence_rule, recurrence_from_completion ? 1 : 0,
                  points, visibility, countdown ? 1 : 0, locked, req.params.id);
           setAssignments(db.get(), task.id, userIds);
+          followTaskSessionAssignments({ primary: task.assigned_to, participants: assignedBefore },
+            { ...task, assigned_to: firstUid, visibility }, req.authUserId || req.session.userId, req.body.session_calendar_moves);
           if (req.body.tags !== undefined) setTags(db.get(), task.id, req.body.tags);
           if (syncTarget !== undefined) {
             db.get().prepare(
@@ -1209,6 +1216,7 @@ router.put('/:id', (req, res) => {
 
     if (pending || undone || syncTarget) pushToCalDAV('Änderung');
   } catch (err) {
+    if (err.status && err.status < 500) return res.status(err.status).json({ error: err.message, code: err.status });
     log.error('PUT /:id error:', err);
     res.status(500).json({ error: 'Internal server error.', code: 500 });
   }

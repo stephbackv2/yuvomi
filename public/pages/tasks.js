@@ -4,6 +4,7 @@
  * Abhängigkeiten: /api.js
  */
 
+import { prepareTaskSessionMoves } from '/components/task-sessions.js';
 import { api } from '/api.js';
 import { renderRRuleFields, bindRRuleEvents, getRRuleValues } from '/rrule-ui.js';
 import { openModal as openSharedModal, closeModal, wireBlurValidation, validateAll, btnSuccess, btnError, btnLoading, promptModal, confirmModal, advancedSection, refocusAfterRender } from '/components/modal.js';
@@ -941,7 +942,7 @@ ${syncTargetFieldHtml(task)}
 
   return `
     <form id="task-form" novalidate>
-      <input type="hidden" id="task-id" value="${task?.id ?? ''}">
+      <input type="hidden" id="task-id" data-primary="${task?.assigned_to ?? ''}" value="${task?.id ?? ''}">
 
       <div class="form-group">
         <div class="form-field">
@@ -1604,6 +1605,12 @@ function openTaskCategoryManager(container) {
 // Formular-Handler
 // --------------------------------------------------------
 
+function taskAssigneeIds(form) {
+  const ids = getSelectedUserIds(form, 'task_assigned');
+  const primary = Number(form.querySelector('#task-id')?.dataset.primary);
+  return ids.includes(primary) ? [primary, ...ids.filter(id => id !== primary)] : ids;
+}
+
 async function handleFormSubmit(e, { container = null, onChanged = () => loadTasks(container) } = {}) {
   e.preventDefault();
   const form      = e.target;
@@ -1646,7 +1653,7 @@ async function handleFormSubmit(e, { container = null, onChanged = () => loadTas
     tags,
     start_date:      startDate || null,
     due_date:        dueDate || null,
-    assigned_to:     getSelectedUserIds(form, 'task_assigned'),
+    assigned_to:     taskAssigneeIds(form),
     visibility:      form.querySelector('#task-visibility')?.value || 'all',
     is_recurring:    rrule.is_recurring ? 1 : 0,
     recurrence_rule: rrule.recurrence_rule,
@@ -1697,6 +1704,16 @@ async function handleFormSubmit(e, { container = null, onChanged = () => loadTas
     }
     const dueDateTime = body.due_time ? new Date(`${dueDate}T${body.due_time}`) : new Date(`${dueDate}T23:59:59`);
     remindAt = new Date(dueDateTime.getTime() - offsetMs).toISOString().slice(0, 19);
+  }
+
+  if (taskId) {
+    try {
+      const moves = await prepareTaskSessionMoves(form, taskId, body.assigned_to);
+      if (!form.isConnected) return;
+      if (JSON.stringify(taskAssigneeIds(form)) !== JSON.stringify(body.assigned_to)) { resetSubmit(t('calendar.sessionReviewMoves')); return; }
+      if (moves === null) { resetSubmit(t('calendar.sessionReviewMoves')); return; }
+      if (moves.length) body.session_calendar_moves = moves;
+    } catch (error) { resetSubmit(error.data?.error || t('calendar.loadError')); return; }
   }
 
   // Wartende Uploads VOR dem Speichern der Aufgabe (#733): scheitert der
