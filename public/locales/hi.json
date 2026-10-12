@@ -698,6 +698,14 @@
         "viewRecipeNamed": "{{title}} की रेसिपी देखें"
     },
     "calendar": {
+        "sessionEdit": "Edit scheduled session",
+        "sessionSchedule": "Schedule task session",
+        "sessionStart": "Start date and time",
+        "sessionDuration": "Duration (minutes)",
+        "sessionMinutes": "{minutes} minutes",
+        "sessionRemove": "Unschedule",
+        "sessionEmpty": "No scheduled sessions",
+        "sessionList": "Scheduled sessions",
         "searchOpen": "इवेंट खोजें",
         "searchPlaceholder": "शीर्षक, स्थान या नोट से खोजें",
         "searchClose": "खोज बंद करें",

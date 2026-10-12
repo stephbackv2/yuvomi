@@ -1,7 +1,7 @@
 /** Scheduling boundaries share task visibility and require both module rights. */
 import express from 'express';
 import { createLogger } from '../logger.js';
-import { plannableTasks, readTaskSessions, scheduleTaskSession, sessionModuleAllowed } from '../services/task-sessions.js';
+import { plannableTasks, readTaskSessions, scheduleTaskSession, updateTaskSession, removeTaskSession, sessionModuleAllowed } from '../services/task-sessions.js';
 import * as db from '../db.js';
 import { serializeEvent, getUserId } from './calendar/helpers.js';
 const log = createLogger('TaskSessions');
@@ -28,6 +28,20 @@ router.post('/:id/sessions', (req, res) => {
     if (!allowed(req, res, 'write')) return;
     const event = scheduleTaskSession({ taskId: Number(req.params.id), actor: getUserId(req), body: req.body || {} });
     res.status(201).json({ data: serializeEvent(event, db.get()) });
+  } catch (error) { sendError(res, error); }
+});
+router.put('/:id/sessions/:sessionId', (req, res) => {
+  try {
+    if (!allowed(req, res, 'write')) return;
+    const event = updateTaskSession({ taskId: Number(req.params.id), sessionId: Number(req.params.sessionId), actor: getUserId(req), body: req.body || {} });
+    res.json({ data: serializeEvent(event, db.get()) });
+  } catch (error) { sendError(res, error); }
+});
+router.delete('/:id/sessions/:sessionId', (req, res) => {
+  try {
+    if (!allowed(req, res, 'write')) return;
+    removeTaskSession({ taskId: Number(req.params.id), sessionId: Number(req.params.sessionId), actor: getUserId(req) });
+    res.status(204).end();
   } catch (error) { sendError(res, error); }
 });
 export default router;

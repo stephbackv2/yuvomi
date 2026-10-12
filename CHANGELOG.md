@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Task sessions can be moved, resized and unscheduled on desktop.** The calendar
+  remembers the initial duration, month/all-day drops offer a time picker, and
+  task details expose session time and removal without changing deadlines.
+  Wall-clock conversion resolves valid times on both sides of daylight-saving changes.
+
 - **Task completion and reopening share one atomic operation.** Creation, full
   updates and status actions keep rewards, history and recurring follow-ups in
   step. Reopening preserves edited successors, and status actions honor task

@@ -16,8 +16,19 @@ export const schemas = {
           type: 'object', required: ['start_datetime'],
           properties: {
             start_datetime: { type: 'string', description: 'ISO date and time, with an explicit offset or wall time in tzid.', examples: ['2026-10-05T10:15', '2026-10-05T08:15:00Z'] },
-            end_datetime: { type: 'string', description: 'Positive interval end; omitted means 30 minutes after start.' },
+            end_datetime: { type: 'string', description: 'Positive interval end; overrides duration_minutes.' },
+            duration_minutes: { type: 'number', exclusiveMinimum: 0, default: 30, description: 'Elapsed duration when end_datetime is omitted.' },
             tzid: { type: 'string', description: 'IANA timezone; defaults to the household zone.', examples: ['Europe/Berlin'] },
+          },
+        },
+        TaskSessionUpdate: {
+          type: 'object', additionalProperties: false,
+          properties: {
+            start_datetime: { type: 'string', description: 'ISO instant or wall time in tzid; omitted keeps the start.' },
+            end_datetime: { type: 'string', description: 'Positive interval end; overrides duration_minutes.' },
+            duration_minutes: { type: 'number', exclusiveMinimum: 0, description: 'Elapsed duration; omitted preserves the existing duration.' },
+            tzid: { type: 'string', description: 'IANA timezone; omitted keeps the session zone.' },
+            expected_revision: { type: ['string', 'integer'], description: 'Optional opaque revision from the session read response.' },
           },
         },
         ApiError: {

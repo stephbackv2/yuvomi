@@ -29,6 +29,7 @@
  * Umgebung sagt ihr, was sie nicht wissen kann.
  */
 
+import { taskSessionsNode } from '/components/task-sessions.js';
 import { api } from '/api.js';
 import { t, formatDate, formatTime } from '/i18n.js';
 import { openDetailView, closeDetailView, visibilityRow, assignedRow } from '/components/detail-view.js';
@@ -730,6 +731,7 @@ function renderTaskDetail(task, reminders = [], ctx) {
     { icon: 'lock', label: t('tasks.lockedLabel'), value: task.locked ? t('tasks.lockedDetail') : '' },
     { icon: 'clock', label: t('tasks.dueDateLabel'), value: due?.label ?? '' },
     { icon: 'calendar-clock', label: t('tasks.startDateLabel'), value: task.start_date ? formatDate(task.start_date) : '' },
+    ...(!task.parent_task_id ? [{ icon: 'calendar-clock', label: t('calendar.sessionList'), node: taskSessionsNode(task, ctx) }] : []),
     recurrenceRow(task.recurrence_rule, { fromCompletion: !!task.recurrence_from_completion }),
     { icon: 'folder', label: t('tasks.categoryLabel'), value: task.category && task.category !== FALLBACK_CATEGORY ? catLabel(task.category, ctx.categories) : '' },
     assignedRow(task.assigned_users, t('tasks.assignedLabel')),

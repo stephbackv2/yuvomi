@@ -207,6 +207,17 @@ export function localToUTC(localStr, tzid) {
       get('year'), get('month') - 1, get('day'), get('hour'), get('minute'), get('second')
     );
     const offsetMs = fakeUTC.getTime() - asUTC;
+    // A transition can separate the fake UTC clock from the desired wall
+    // clock. Probe both sides, as the calendar gesture helper does, and keep
+    // only candidates whose wall fields match. Gaps retain the old fallback.
+    for (const days of [-2, -1, 0, 1, 2]) {
+      const probe = Math.floor(fakeUTC.getTime() / 1000) * 1000 + days * 86400000;
+      const wall = utcToWall(new Date(probe).toISOString(), tzid);
+      const offset = Date.parse(`${wall.date}T${wall.time}Z`) - probe;
+      const candidate = new Date(fakeUTC.getTime() - offset).toISOString();
+      const actual = utcToWall(candidate, tzid);
+      if (`${actual.date}T${actual.time}` === fakeUTC.toISOString().slice(0, 19)) return candidate.replace('.000Z', 'Z');
+    }
     return new Date(fakeUTC.getTime() + offsetMs).toISOString().replace('.000Z', 'Z');
   } catch { return localStr; }
 }

@@ -26,6 +26,15 @@ const MIN_LENGTH = 13; // Werte ab 13 Zeichen zaehlen
 // This fork translates new UI text into DE/EN only. Keep the
 // detector and all unrelated baseline counts intact (docs/fork-preferences.md).
 const FORK_ENGLISH_COMPATIBILITY_KEYS = new Set([
+  'calendar.sessionEdit',
+  'calendar.sessionSchedule',
+  'calendar.sessionStart',
+  'calendar.sessionDuration',
+  'calendar.sessionMinutes',
+  'calendar.sessionRemove',
+  'calendar.sessionEmpty',
+  'calendar.sessionList',
+
   'calendar.panelExpand',
   'calendar.panelCollapse',
   'calendar.panelPlacement',

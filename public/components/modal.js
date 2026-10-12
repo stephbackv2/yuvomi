@@ -991,6 +991,7 @@ export function updateHeaderAction(panel, { label, onClick, hidden = false } = {
  * @param {string}   opts.title    - Titel im Modal-Header
  * @param {string}   opts.content  - HTML-String für den Modal-Body
  * @param {Function} [opts.onSave]   - Callback, wird nach Einfügen in DOM aufgerufen
+ * @param {Function} [opts.canClose] - Return false to block user dismissal while saving.
  * @param {Function} [opts.onClose]  - Callback, wird aufgerufen wenn das Modal geschlossen wird
  * @param {Function} [opts.onDelete] - Falls vorhanden, wird ein Löschen-Button eingebaut
  * @param {string}   [opts.size='md'] - 'sm' (400px) | 'md' (520px) | 'lg' (680px) | 'xl' (min(960px, 95vw)); Breiten siehe layout.css .modal-panel--*
@@ -998,7 +999,7 @@ export function updateHeaderAction(panel, { label, onClick, hidden = false } = {
  * @param {{label: string, id?: string, onClick?: Function}} [opts.headerAction] - Textbutton rechts im Kopf, links vom Schließen-X
  */
 export function openModal({
-  title, content, onSave, onDelete, onClose, size = 'md',
+  title, content, onSave, onDelete, onClose, canClose, size = 'md',
   initialFocus = 'first-field', headerAction = null,
 } = {}) {
   // Vorheriges Modal schließen (kein Stacking).
@@ -1047,6 +1048,7 @@ export function openModal({
   document.body.insertAdjacentHTML('beforeend', html);
   activeOverlay = document.getElementById('shared-modal-overlay');
   activeOverlay._onCloseCallback = onClose;
+  activeOverlay._canClose = canClose;
 
   // Lucide-Icons rendern
   if (window.lucide) window.lucide.createIcons({ el: activeOverlay });
@@ -1150,6 +1152,7 @@ export async function closeModal({ force = false } = {}) {
   if (!activeOverlay || modalState === 'closing') return true;
 
   if (!force) {
+    if (activeOverlay._canClose?.() === false) return false;
     const panel = activeOverlay.querySelector('.modal-panel');
     if (panel && isFormDirty(panel)) {
       // Dirty Modal in den Confirm-Slot parken (modalState → 'confirming').

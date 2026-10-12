@@ -710,6 +710,14 @@
         "viewRecipeNamed": "Rezept zu {{title}} ansehen"
     },
     "calendar": {
+        "sessionEdit": "Geplante Arbeitszeit bearbeiten",
+        "sessionSchedule": "Arbeitszeit für Aufgabe planen",
+        "sessionStart": "Startdatum und Uhrzeit",
+        "sessionDuration": "Dauer (Minuten)",
+        "sessionMinutes": "{minutes} Minuten",
+        "sessionRemove": "Planung entfernen",
+        "sessionEmpty": "Keine geplanten Arbeitszeiten",
+        "sessionList": "Geplante Arbeitszeiten",
         "searchOpen": "Termine suchen",
         "searchPlaceholder": "Nach Titel, Ort oder Notiz suchen",
         "searchClose": "Suche schließen",

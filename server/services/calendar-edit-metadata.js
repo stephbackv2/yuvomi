@@ -106,7 +106,7 @@ function providerWriteCapability(database, event, provider) {
 export function getEditCapabilities(database, event) {
   const provider = providerForEvent(event);
   const writable = event?.task_id
-    ? { editable: false, reason: 'task_session' }
+    ? { editable: event.session_status !== 'completed', reason: event.session_status === 'completed' ? 'task_session' : null }
     : providerWriteCapability(database, event, provider);
   const recurring = !!event?.recurrence_rule;
   const editable = writable.editable;

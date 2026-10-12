@@ -698,6 +698,14 @@
         "viewRecipeNamed": "Ver a receita de {{title}}"
     },
     "calendar": {
+        "sessionEdit": "Edit scheduled session",
+        "sessionSchedule": "Schedule task session",
+        "sessionStart": "Start date and time",
+        "sessionDuration": "Duration (minutes)",
+        "sessionMinutes": "{minutes} minutes",
+        "sessionRemove": "Unschedule",
+        "sessionEmpty": "No scheduled sessions",
+        "sessionList": "Scheduled sessions",
         "searchOpen": "Pesquisar eventos",
         "searchPlaceholder": "Pesquisar por título, local ou nota",
         "searchClose": "Fechar pesquisa",

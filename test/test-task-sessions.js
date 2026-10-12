@@ -152,3 +152,86 @@ test('planning filters retain visibility and count allocations outside the calen
   rows = (await call('GET', `/tasks/plannable?assigned_to=${users[1]}`)).data;
   assert.equal(rows.find(t => t.id === visible.id).session_count, 1);
 });
+
+
+test('move and resize a session without changing its identity, participants or parent deadline', async () => {
+  const parent = await task({ assigned_to: [users[1], users[0]] });
+  const session = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  const moved = await call('PUT', `/tasks/${parent.id}/sessions/${session.id}`, {
+    start_datetime: '2090-03-31T23:45', end_datetime: '2090-04-01T00:15', tzid: 'Europe/Berlin',
+  });
+  assert.equal(moved.status, 200, JSON.stringify(moved));
+  assert.equal(moved.data.id, session.id);
+  assert.equal(moved.data.task_id, parent.id);
+  assert.equal(moved.data.start_datetime, '2090-03-31T21:45:00.000Z');
+  assert.equal(moved.data.end_datetime, '2090-03-31T22:15:00.000Z');
+  assert.deepEqual(moved.data.assigned_users, session.assigned_users);
+  const resized = await call('PUT', `/tasks/${parent.id}/sessions/${session.id}`, {
+    start_datetime: moved.data.start_datetime, end_datetime: '2090-03-31T23:15:00Z', tzid: 'Europe/Berlin',
+  });
+  assert.equal(resized.status, 200);
+  assert.equal(resized.data.end_datetime, '2090-03-31T23:15:00.000Z');
+  assert.equal((await call('GET', `/tasks/${parent.id}/sessions`)).data.length, 1);
+  assert.equal((await call('GET', `/tasks/${parent.id}`)).data.due_date, parent.due_date);
+});
+
+
+test('unschedule only the selected allocation and keep the parent and other sessions', async () => {
+  const parent = await task();
+  const first = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  const second = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  assert.equal((await call('DELETE', `/tasks/${parent.id}/sessions/${first.id}`)).status, 204);
+  assert.deepEqual((await call('GET', `/tasks/${parent.id}/sessions`)).data.map(e => e.id), [second.id]);
+  assert.equal((await call('GET', `/calendar/${first.id}`)).status, 404);
+  assert.equal((await call('GET', `/tasks/${parent.id}`)).data.due_date, parent.due_date);
+  assert.equal((await call('GET', '/tasks/plannable')).data.find(t => t.id === parent.id).session_count, 1);
+});
+
+test('duration preferences and start-only moves use elapsed time across DST; rejected edits retain allocations', async () => {
+  const parent = await task({ visibility: 'private', assigned_to: [users[0]] });
+  const made = await call('POST', `/tasks/${parent.id}/sessions`, { start_datetime: '2026-03-29T01:45', tzid: 'Europe/Berlin', duration_minutes: 45 });
+  assert.equal(made.status, 201);
+  assert.equal(made.data.end_datetime, '2026-03-29T01:30:00.000Z');
+  const preciseParent = await task();
+  const precise = await call('POST', `/tasks/${preciseParent.id}/sessions`, { start_datetime: '2026-03-29T01:45:00.333', tzid: 'Europe/Berlin', duration_minutes: 15 });
+  assert.equal(precise.status, 201);
+  assert.equal(precise.data.start_datetime, '2026-03-29T00:45:00.333Z');
+  assert.equal(precise.data.end_datetime, '2026-03-29T01:00:00.333Z');
+  const path = `/tasks/${parent.id}/sessions/${made.data.id}`;
+  const moved = await call('PUT', path, { start_datetime: '2026-10-25T01:45', expected_revision: made.data.edit_revision });
+  assert.equal(moved.status, 200);
+  assert.equal(Date.parse(moved.data.end_datetime) - Date.parse(moved.data.start_datetime), 45 * 60_000);
+  for (const body of [{ duration_minutes: 0 }, { duration_minutes: -15 }, { duration_minutes: '45' }, { start_datetime: '2026-03-29T02:15' }, { assigned_to: users[1] }]) {
+    assert.equal((await call('PUT', path, body)).status, 400);
+  }
+  assert.equal((await call('PUT', path, { duration_minutes: 60, expected_revision: made.data.edit_revision })).status, 409);
+  assert.equal((await call('PUT', path, { duration_minutes: 60 }, users[1])).status, 404);
+  assert.equal((await call('DELETE', path, null, users[1])).status, 404);
+  scopes = ['tasks:write'];
+  assert.equal((await call('PUT', path, { duration_minutes: 60 })).status, 403);
+  assert.equal((await call('DELETE', path)).status, 403);
+  scopes = null;
+  assert.deepEqual((await call('GET', `/tasks/${parent.id}/sessions`)).data, [moved.data]);
+});
+
+test('unscheduling retains the existing provider deletion identity and invalid cross-task edits do nothing', async () => {
+  const parent = await task();
+  const other = await task();
+  const session = (await call('POST', `/tasks/${parent.id}/sessions`, interval)).data;
+  db.prepare("INSERT OR REPLACE INTO sync_config (key, value) VALUES ('google_refresh_token', 'fixture')").run();
+  db.prepare("UPDATE calendar_events SET external_source = 'google', external_calendar_id = 'remote-session-07', target_google_calendar_id = 'remote-calendar' WHERE id = ?").run(session.id);
+  const path = `/tasks/${parent.id}/sessions/${session.id}`;
+  assert.equal((await call('PUT', `/tasks/${other.id}/sessions/${session.id}`, { duration_minutes: 60 })).status, 404);
+  assert.equal((await call('DELETE', `/tasks/${other.id}/sessions/${session.id}`)).status, 404);
+  assert.equal((await call('PUT', '/tasks/no/sessions/no', {})).status, 400);
+  const read = (await call('GET', `/tasks/${parent.id}/sessions`)).data[0];
+  const moved = await call('PUT', path, { duration_minutes: 60, expected_revision: read.revision });
+  assert.equal(moved.status, 200, JSON.stringify(moved));
+  assert.equal(moved.data.external_calendar_id, 'remote-session-07');
+  assert.equal(moved.data.target_google_calendar_id, 'remote-calendar');
+  assert.equal((await call('DELETE', path)).status, 204);
+  assert.deepEqual(db.prepare("SELECT source, calendar_external_id, event_external_id FROM calendar_pending_deletions WHERE event_external_id = 'remote-session-07'").get(), {
+    source: 'google', calendar_external_id: 'remote-calendar', event_external_id: 'remote-session-07',
+  });
+  assert.equal((await call('GET', `/tasks/${parent.id}`)).data.due_date, parent.due_date);
+});

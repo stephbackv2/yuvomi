@@ -9,6 +9,8 @@ import { tokenAllows } from '../scopes.js';
 import { householdTimeZone, isValidTimeZone, storedToInstantMs, utcToWall, todayKey, hasExplicitZone } from '../utils/timezone.js';
 import { setAssignments } from '../utils/task-assignments.js';
 import { markTodoOutbound } from './caldav-todo-outbound.js';
+import { markEventOutbound, queueEventDeletion } from './calendar-outbound.js';
+import { eventRevisionToken } from './calendar-edit-metadata.js';
 
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
 
@@ -68,8 +70,10 @@ function interval(body) {
     return instant;
   };
   const start = parse(body.start_datetime);
-  const end = body.end_datetime == null ? start + 30 * 60_000 : parse(body.end_datetime);
-  if (end <= start) fail('Session end must follow its start.');
+  const duration = body.duration_minutes ?? 30;
+  if (typeof duration !== 'number' || !Number.isFinite(duration) || duration <= 0) fail('Invalid session duration.');
+  const end = body.end_datetime == null ? start + duration * 60_000 : parse(body.end_datetime);
+  if (!Number.isFinite(end) || Math.abs(end) > 8.64e15 || end <= start) fail('Session end must follow its start.');
   return { start: new Date(start).toISOString(), end: new Date(end).toISOString(), tzid };
 }
 
@@ -102,5 +106,40 @@ export function scheduleTaskSession({ taskId, actor, body }) {
       task.title, times.start, times.end, times.tzid, actor, task.assigned_to || actor, task.visibility, taskId).lastInsertRowid);
     for (const uid of participants) db.get().prepare('INSERT INTO event_assignments (event_id, user_id) VALUES (?, ?)').run(id, uid);
     return readTaskSessions(taskId, actor).find(e => e.id === id);
+  })();
+}
+
+
+function visibleSession(taskId, sessionId, actor) {
+  if (![taskId, sessionId].every(id => Number.isSafeInteger(id) && id > 0)) fail('Invalid session id.');
+  visibleTask(taskId, actor);
+  const session = db.get().prepare('SELECT * FROM calendar_events WHERE id = ? AND task_id = ?').get(sessionId, taskId);
+  if (!session) fail('Session not found.', 404);
+  return session;
+}
+
+export function removeTaskSession({ taskId, sessionId, actor }) {
+  return db.get().transaction(() => {
+    const session = visibleSession(taskId, sessionId, actor);
+    queueEventDeletion(session, db.get());
+    db.get().prepare('DELETE FROM calendar_events WHERE id = ?').run(sessionId);
+  })();
+}
+
+export function updateTaskSession({ taskId, sessionId, actor, body }) {
+  const allowed = ['start_datetime', 'end_datetime', 'duration_minutes', 'tzid', 'expected_revision'];
+  if (Object.keys(body).some(key => !allowed.includes(key))) fail('Only session time can be changed.');
+  return db.get().transaction(() => {
+    const before = visibleSession(taskId, sessionId, actor);
+    if (before.session_status === 'completed') fail('Reopen the session before editing its duration.', 409);
+    if (body.expected_revision !== undefined && String(body.expected_revision) !== eventRevisionToken(before)) fail('Session changed. Reload before editing.', 409);
+    const times = interval({ start_datetime: body.start_datetime ?? before.start_datetime,
+      end_datetime: body.end_datetime, tzid: body.tzid ?? before.tzid,
+      duration_minutes: body.duration_minutes ?? (Date.parse(before.end_datetime) - Date.parse(before.start_datetime)) / 60_000 });
+    db.get().prepare('UPDATE calendar_events SET start_datetime = ?, end_datetime = ?, tzid = ? WHERE id = ?')
+      .run(times.start, times.end, times.tzid, sessionId);
+    const after = readTaskSessions(taskId, actor).find(event => event.id === sessionId);
+    markEventOutbound(before, after);
+    return readTaskSessions(taskId, actor).find(event => event.id === sessionId);
   })();
 }

@@ -4,6 +4,7 @@
  * Abhängigkeiten: /api.js, /router.js (window.yuvomi)
  */
 
+import { openTaskSessionEditor, canPlanTaskSessions } from '/components/task-sessions.js';
 import { api } from '/api.js';
 import { moduleAccess } from '/permissions.js';
 import { renderRRuleFields, bindRRuleEvents, getRRuleValues, recurrenceRow } from '/rrule-ui.js';
@@ -1455,8 +1456,10 @@ export async function render(container, { user }) {
   state.panelAssignee = '';
   state.panelSearch = '';
   state.panelAllocation = 'all';
+  state.panelDuration = 30;
   try {
     const saved = JSON.parse(localStorage.getItem(taskPanelStorageKey(user?.id)) || '{}');
+    if (Number.isFinite(saved.duration) && saved.duration >= 15 && saved.duration % 15 === 0) state.panelDuration = saved.duration;
     state.panelPlacement = saved.placement === 'below' ? 'below' : 'beside';
     state.panelCollapsed = saved.collapsed === true;
     state.panelSize = Math.max(TASK_PANEL_SIZE.min, Math.min(TASK_PANEL_SIZE.max, Number(saved.size) || TASK_PANEL_SIZE.initial));
@@ -2004,8 +2007,9 @@ function ensureCalendarGestureListeners() {
     if (event.button !== 0 || event.pointerType === 'touch') return;
     const element = calendarEventElement(event.target);
     const source = eventFromElement(element);
-    if (!element || !source || source.task_id || state.view === 'agenda') return;
+    if (!element || !source || state.view === 'agenda') return;
 
+    if (source.task_id && !canPlanTaskSessions()) return;
     const handle = event.target.closest?.('[data-resize-edge]');
     const action = handle ? 'resize' : 'move';
     const sourceRange = eventRange(source);
@@ -2097,7 +2101,7 @@ function ensureCalendarGestureListeners() {
 }
 
 function calendarEventElement(target) {
-  return target?.closest?.('[data-calendar-direct-event]') || null;
+  return target?.closest?.('[data-calendar-direct-event], [data-task-session]') || null;
 }
 
 function eventFromElement(element) {
@@ -2191,7 +2195,7 @@ function gestureRangeAtTarget(gesture, target, pointerEvent = null) {
     return resizeEventRange(gesture.source, gesture.edge, resizeTarget, { allDaySpan: gesture.allDaySpan });
   }
   const monthTimedMove = !gesture.sourceRange.allDay
-    && gestureViewForElement(gesture.element) === 'month'
+    && (gesture.source.task_id || gestureViewForElement(gesture.element) === 'month')
     && target.kind === 'all-day';
   const moveTarget = monthTimedMove
     ? { ...target, kind: 'grid', time: gesture.sourceRange.startTime }
@@ -2365,7 +2369,9 @@ async function saveCalendarGesture(gesture, scope) {
   if (!body) return;
   body.edit_action = gesture.action === 'move' ? 'move' : 'resize';
   try {
-    const response = await api.put('/calendar/' + gesture.source.id, body);
+    const response = gesture.source.task_id
+      ? await api.put(`/tasks/${gesture.source.task_id}/sessions/${gesture.source.id}`, { start_datetime: body.start_datetime, end_datetime: body.end_datetime, tzid: body.tzid, expected_revision: body.expected_revision })
+      : await api.put('/calendar/' + gesture.source.id, body);
     const updated = responseEvent(response);
     if (updated) {
       const index = state.events.findIndex((event) => String(event.id) === String(updated.id));
@@ -2676,6 +2682,7 @@ function renderMonthView(container) {
   _monthGridResizeObserver?.disconnect();
   _monthGridResizeObserver = new ResizeObserver(() => scheduleMonthFit(grid));
   _monthGridResizeObserver.observe(grid);
+  bindTaskSessionDrops(container);
 }
 
 /**
@@ -5877,7 +5884,7 @@ function renderTaskPanel() {
   panel.classList.toggle('is-collapsed', state.panelCollapsed);
   panel.style.setProperty('--task-panel-size', `${state.panelSize}px`);
   const save = () => {
-    try { localStorage.setItem(taskPanelStorageKey(state.currentUserId), JSON.stringify({ placement: state.panelPlacement, collapsed: state.panelCollapsed, size: state.panelSize })); } catch { /* Storage may be unavailable. */ }
+    try { localStorage.setItem(taskPanelStorageKey(state.currentUserId), JSON.stringify({ placement: state.panelPlacement, collapsed: state.panelCollapsed, size: state.panelSize, duration: state.panelDuration })); } catch { /* Storage may be unavailable. */ }
   };
   const tasks = state.panelTasks.filter(task => task.title.toLocaleLowerCase().includes(state.panelSearch.toLocaleLowerCase())
     && (state.panelAllocation === 'all' || !task.session_count));
@@ -5887,6 +5894,7 @@ function renderTaskPanel() {
     <div class="calendar-task-panel__content" ${state.panelCollapsed ? 'hidden' : ''}>
     <label>${esc(t('calendar.panelPlacement'))}<select id="task-panel-placement"><option value="beside">${esc(t('calendar.panelBeside'))}</option><option value="below">${esc(t('calendar.panelBelow'))}</option></select></label>
     <label>${esc(t('calendar.panelSize'))}<input id="task-panel-size" type="range" min="${TASK_PANEL_SIZE.min}" max="${TASK_PANEL_SIZE.max}" value="${state.panelSize}"></label>
+    <label>${esc(t('calendar.sessionDuration'))}<input id="task-panel-duration" type="number" min="15" step="15" required value="${state.panelDuration}"></label>
     <label>${esc(t('calendar.panelSearch'))}<input id="task-panel-search" type="search" value="${esc(state.panelSearch)}"></label>
     <label>${esc(t('calendar.panelAssignee'))}<select id="task-panel-assignee"><option value="">${esc(t('calendar.panelMine'))}</option>${state.users.filter(u => u.id !== state.currentUserId).map(u => `<option value="${u.id}">${esc(u.display_name)}</option>`).join('')}</select></label>
     <label>${esc(t('calendar.panelAllocations'))}<select id="task-panel-allocation"><option value="all">${esc(t('calendar.panelAll'))}</option><option value="unscheduled">${esc(t('calendar.panelUnscheduled'))}</option></select></label>
@@ -5896,6 +5904,7 @@ function renderTaskPanel() {
   panel.querySelector('#task-panel-placement').value = state.panelPlacement;
   panel.querySelector('#task-panel-placement').onchange = event => { state.panelPlacement = event.target.value; save(); renderTaskPanel(); };
   panel.querySelector('#task-panel-size').oninput = event => { state.panelSize = Number(event.target.value); panel.style.setProperty('--task-panel-size', `${state.panelSize}px`); save(); };
+  panel.querySelector('#task-panel-duration').onchange = event => { if (event.target.checkValidity()) { state.panelDuration = Number(event.target.value); save(); } else event.target.value = state.panelDuration; };
   panel.querySelector('#task-panel-search').oninput = event => {
     const position = event.target.selectionStart;
     state.panelSearch = event.target.value; renderTaskPanel();
@@ -5922,7 +5931,7 @@ function renderTaskPanel() {
 }
 
 function bindTaskSessionDrops(container) {
-  for (const col of container.querySelectorAll('.week-view__col, .day-view__col')) {
+  for (const col of container.querySelectorAll('.week-view__col, .day-view__col, .month-day[data-date], .allday-cell[data-date]')) {
     col.addEventListener('dragover', event => {
       if (!event.dataTransfer.types.includes('application/x-yuvomi-task') || !window.matchMedia('(min-width: 1024px)').matches) return;
       event.preventDefault(); event.dataTransfer.dropEffect = 'copy';
@@ -5934,9 +5943,15 @@ function bindTaskSessionDrops(container) {
       const taskId = event.dataTransfer.getData('application/x-yuvomi-task');
       if (!/^\d+$/.test(taskId) || !window.matchMedia('(min-width: 1024px)').matches) return;
       event.preventDefault(); event.stopPropagation();
+      const refresh = async () => { await loadRange(state.rangeFrom, state.rangeTo); renderView(); };
+      if (col.matches('.month-day, .allday-cell')) {
+        openTaskSessionEditor({ taskId, date: col.dataset.date, duration: state.panelDuration, onChanged: refresh });
+        return;
+      }
       try {
         await api.post(`/tasks/${taskId}/sessions`, {
           start_datetime: `${col.dataset.date}T${clickedTime(event, col)}`,
+          duration_minutes: state.panelDuration,
           tzid: displayTimeZone() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         });
         await loadRange(state.rangeFrom, state.rangeTo);

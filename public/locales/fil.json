@@ -710,6 +710,14 @@
         "viewRecipeNamed": "Tingnan ang resipe ng {{title}}"
     },
     "calendar": {
+        "sessionEdit": "Edit scheduled session",
+        "sessionSchedule": "Schedule task session",
+        "sessionStart": "Start date and time",
+        "sessionDuration": "Duration (minutes)",
+        "sessionMinutes": "{minutes} minutes",
+        "sessionRemove": "Unschedule",
+        "sessionEmpty": "No scheduled sessions",
+        "sessionList": "Scheduled sessions",
         "searchOpen": "Maghanap ng kaganapan",
         "searchPlaceholder": "Maghanap ayon sa pamagat, lokasyon o tala",
         "searchClose": "Isara ang paghahanap",

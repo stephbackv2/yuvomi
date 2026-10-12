@@ -710,6 +710,14 @@
         "viewRecipeNamed": "{{title}} 레시피 보기"
     },
     "calendar": {
+        "sessionEdit": "Edit scheduled session",
+        "sessionSchedule": "Schedule task session",
+        "sessionStart": "Start date and time",
+        "sessionDuration": "Duration (minutes)",
+        "sessionMinutes": "{minutes} minutes",
+        "sessionRemove": "Unschedule",
+        "sessionEmpty": "No scheduled sessions",
+        "sessionList": "Scheduled sessions",
         "searchOpen": "일정 검색",
         "searchPlaceholder": "제목, 장소 또는 메모로 검색",
         "searchClose": "검색 닫기",
