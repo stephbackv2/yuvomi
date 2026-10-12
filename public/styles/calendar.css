@@ -2266,3 +2266,14 @@
 .calendar-task-card:active { cursor: grabbing; }
 .is-task-drop-target { outline: var(--space-0h) solid var(--color-accent); outline-offset: calc(-1 * var(--space-0h)); }
 [data-task-session] .calendar-resize-handle { display: none; }
+
+
+@media (min-width: 1024px) {
+  .calendar-task-panel:not([hidden]) { width: var(--task-panel-size); flex-basis: var(--task-panel-size); max-width: 45%; }
+  .calendar-workspace[data-task-placement="below"] { flex-direction: column; }
+  .calendar-workspace[data-task-placement="below"] > .calendar-task-panel:not([hidden]) { width: 100%; max-width: none; max-height: 45%; border-inline-start: 0; border-top: var(--space-px) solid var(--color-border); }
+  .calendar-task-panel.is-collapsed:not([hidden]) { width: auto; flex-basis: auto; }
+  .calendar-task-panel__header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+  .calendar-task-panel__content > label { display: flex; flex-direction: column; gap: var(--space-1); margin-bottom: var(--space-2); }
+  .calendar-task-panel__content input, .calendar-task-panel__content select { width: 100%; min-width: 0; }
+}

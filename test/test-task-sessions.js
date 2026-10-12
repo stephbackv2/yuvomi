@@ -139,3 +139,16 @@ test('reopening a recurring origin retains a successor with allocated work', asy
   assert.equal((await call('GET', `/tasks/${successor.id}`)).status, 200);
   assert.equal((await call('GET', `/tasks/${successor.id}/sessions`)).data.length, 1);
 });
+
+
+test('planning filters retain visibility and count allocations outside the calendar range', async () => {
+  const visible = await task({ title: 'Other member planning', assigned_to: [users[1]], visibility: 'household' });
+  const hidden = (await call('POST', '/tasks', { title: 'Private planning', start_date: '2000-01-01', assigned_to: [users[1]], visibility: 'private' }, users[1])).data;
+  let rows = (await call('GET', `/tasks/plannable?assigned_to=${users[1]}`)).data;
+  assert.ok(rows.some(t => t.id === visible.id));
+  assert.ok(!rows.some(t => t.id === hidden.id));
+  assert.ok(!(await call('GET', '/tasks/plannable')).data.some(t => t.id === visible.id));
+  await call('POST', `/tasks/${visible.id}/sessions`, interval);
+  rows = (await call('GET', `/tasks/plannable?assigned_to=${users[1]}`)).data;
+  assert.equal(rows.find(t => t.id === visible.id).session_count, 1);
+});

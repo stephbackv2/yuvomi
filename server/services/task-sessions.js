@@ -30,14 +30,15 @@ function visibleTask(id, actor) {
   return task;
 }
 
-export function plannableTasks(actor) {
-  return db.get().prepare(`SELECT t.* FROM tasks t WHERE
+export function plannableTasks(actor, assignee = actor) {
+  if (!Number.isSafeInteger(assignee) || assignee <= 0) fail("Invalid assignee.");
+  return db.get().prepare(`SELECT t.*, (SELECT COUNT(*) FROM calendar_events e WHERE e.task_id = t.id) AS session_count FROM tasks t WHERE
     ${taskScopeWhere('t', { bind: '@today' })}
     AND t.status <> 'done' AND t.archived_at IS NULL
     AND ${visibilityWhere('t', 'task_assignments', 'task_id', '@actor')}
-    AND (t.assigned_to = @actor OR EXISTS (SELECT 1 FROM task_assignments a WHERE a.task_id = t.id AND a.user_id = @actor)
+    AND (t.assigned_to = @assignee OR EXISTS (SELECT 1 FROM task_assignments a WHERE a.task_id = t.id AND a.user_id = @assignee)
       OR (t.assigned_to IS NULL AND NOT EXISTS (SELECT 1 FROM task_assignments a WHERE a.task_id = t.id)))
-    ORDER BY t.due_date IS NULL, t.due_date, t.id`).all({ actor, today: todayKey(db.get()) });
+    ORDER BY t.due_date IS NULL, t.due_date, t.id`).all({ actor, assignee, today: todayKey(db.get()) });
 }
 
 export function readTaskSessions(taskId, actor) {

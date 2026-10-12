@@ -12,3 +12,7 @@ User preference recorded on 2026-09-22:
 Confirmed again for calendar recovery on 2026-10-01. The recovery review,
 field-choice and local discard text follows this policy; compatibility checks
 allow English only for these newly added keys outside German and English.
+
+Confirmed for the calendar task panel on 2026-10-12. New panel labels are
+translated into German and English; other locales carry English compatibility
+values, with a scoped exception in the translation guard.

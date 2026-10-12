@@ -16,7 +16,7 @@ function sendError(res, error) {
   res.status(status).json({ error: status === 500 ? 'Internal error.' : error.message, code: status });
 }
 router.get('/plannable', (req, res) => {
-  try { if (allowed(req, res, 'read')) res.json({ data: plannableTasks(getUserId(req)) }); }
+  try { if (allowed(req, res, 'read')) res.json({ data: plannableTasks(getUserId(req), req.query.assigned_to === undefined ? getUserId(req) : Number(req.query.assigned_to)) }); }
   catch (error) { sendError(res, error); }
 });
 router.get('/:id/sessions', (req, res) => {

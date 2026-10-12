@@ -35,6 +35,7 @@ async function drag(page, taskId, view) {
   });
   const card = await page.$(`[data-plannable-task-id="${taskId}"]`);
   assert.ok(card);
+  await card.scrollIntoView();
   const response = page.waitForResponse(res => res.url().endsWith(`/tasks/${taskId}/sessions`) && res.request().method() === 'POST');
   await page.mouse.dragAndDrop(await card.clickablePoint(), point, { delay: 100 });
   const res = await response;
@@ -56,9 +57,56 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
     await gotoRoute(page, '/calendar');
     await page.waitForSelector(`[data-plannable-task-id="${parent.id}"]`);
     assert.match(await page.$eval(`[data-task-id="${parent.id}"]`, el => el.textContent), /Deadline:/);
-    console.log('Panel loaded; dragging first allocation');
+    await page.setViewport({ width: 1024, height: 768 });
+    for (const placement of ['beside', 'below']) {
+      await page.select('#task-panel-placement', placement);
+      for (const size of [160, 480]) {
+        await page.$eval('#task-panel-size', (el, size) => { el.value = String(size); el.dispatchEvent(new Event('input', { bubbles: true })); }, size);
+        await page.$eval(`[data-plannable-task-id="${parent.id}"]`, el => el.scrollIntoView({ block: 'nearest' }));
+        // Today is intentionally hidden while the displayed range contains today.
+        const usable = await page.evaluate(taskId => {
+          const rect = document.querySelector('#cal-body').getBoundingClientRect();
+          const visible = selector => {
+            const box = document.querySelector(selector).getBoundingClientRect();
+            return box.width > 0 && box.height > 0 && box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight;
+          };
+          return { calendar: { width: rect.width, height: rect.height }, controls: ['#cal-prev', '#cal-next', '#cal-view-tab-day', `[data-plannable-task-id="${taskId}"]`].map(selector => ({ selector, visible: visible(selector), rect: document.querySelector(selector).getBoundingClientRect().toJSON() })) };
+        }, parent.id);
+        assert.ok(usable.calendar.width > 200 && usable.calendar.height > 180 && usable.controls.every(control => control.visible), `calendar controls and task remain visible: ${placement}, ${size}: ${JSON.stringify(usable)}`);
+      }
+    }
+    await page.select('#task-panel-placement', 'beside');
+    await page.$eval('#task-panel-size', el => { el.value = '280'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.setViewport({ width: 1440, height: 950 });
+
+    await page.select('#task-panel-allocation', 'unscheduled');
+    await page.type('#task-panel-search', 'Drag fixture');
+    console.log('Panel loaded; dragging filtered first allocation');
     const first = await drag(page, parent.id, 'day');
-    console.log('First allocation created; dragging again');
+    await page.select('#task-panel-allocation', 'unscheduled');
+    assert.equal(await page.$(`[data-plannable-task-id="${parent.id}"]`), null);
+    await page.select('#task-panel-allocation', 'all');
+    await page.$eval('#task-panel-search', el => { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.type('#task-panel-search', 'no matching task');
+    assert.equal(await page.$(`[data-plannable-task-id="${parent.id}"]`), null);
+    await page.$eval('#task-panel-search', el => { el.value = 'Drag fixture'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.waitForSelector(`[data-plannable-task-id="${parent.id}"]`);
+    await page.select('#task-panel-placement', 'below');
+    await page.$eval('#task-panel-size', el => { el.value = '240'; el.dispatchEvent(new Event('input', { bubbles: true })); });
+    await page.click('#task-panel-collapse');
+    assert.equal(await page.$eval('#task-panel-collapse', el => el.getAttribute('aria-expanded')), 'false');
+    await page.reload({ waitUntil: 'networkidle0' });
+    assert.equal(await page.$eval('.calendar-workspace', el => el.dataset.taskPlacement), 'below');
+    assert.equal(await page.$eval('#task-panel-collapse', el => el.getAttribute('aria-expanded')), 'false');
+    await page.click('#task-panel-collapse');
+    assert.equal(await page.$eval('#task-panel-size', el => el.value), '240');
+    const layout = await page.evaluate(() => {
+      const calendar = document.querySelector('#cal-body').getBoundingClientRect();
+      const panel = document.querySelector('#calendar-task-panel').getBoundingClientRect();
+      return { height: calendar.height, below: panel.top >= calendar.bottom - 1 };
+    });
+    assert.ok(layout.height > 200); assert.ok(layout.below);
+    console.log('First allocation created; dragging again from below');
     const second = await drag(page, parent.id, 'day');
     assert.notEqual(first.id, second.id);
     assert.equal(Date.parse(first.end_datetime) - Date.parse(first.start_datetime), 1_800_000);
@@ -81,6 +129,9 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
     const shared = (await request(page, 'post', '/tasks', { title: 'Shared drag task', assigned_to: [fixture.other, unchanged.assigned_to] })).data;
     await page.evaluate(() => localStorage.setItem('yuvomi:calendar:view', 'week'));
     await gotoRoute(page, '/calendar');
+    await page.select('#task-panel-placement', 'beside');
+    await page.select('#task-panel-assignee', String(fixture.other));
+    await page.waitForSelector(`[data-plannable-task-id="${shared.id}"]`);
     const sharedSession = await drag(page, shared.id, 'week');
     assert.equal(sharedSession.assigned_to, fixture.other); assert.equal(sharedSession.assigned_users.length, 2);
     for (const view of ['month', 'agenda']) {
@@ -112,5 +163,6 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
     await request(page, 'delete', `/tasks/${parent.id}`);
     const remaining = (await request(page, 'get', `/calendar?from=2001-01-01&to=2090-01-02`)).data;
     assert.ok(!remaining.some(session => session.task_id === parent.id));
-  } finally { await harness.close(); }
+  } catch (error) { console.error(error); throw error; }
+  finally { await harness.close(); }
 });

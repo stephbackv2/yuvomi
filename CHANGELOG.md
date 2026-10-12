@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The desktop calendar task panel supports search, assignee and allocation filters.**
+  Move it beside or below the calendar, resize it, and collapse it. Layout choices
+  survive visits; All keeps allocated tasks available for additional work sessions.
+
 - **Tasks can be dragged into local calendar work sessions.** The desktop
   task panel reserves 30-minute blocks in day and week views, keeps tasks
   available for further allocations, and preserves deadlines. Sessions inherit

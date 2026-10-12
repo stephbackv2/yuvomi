@@ -591,6 +591,13 @@ let state = {
   cursor:        null,     // aktuell angezeigte Referenz-Datum (YYYY-MM-DD)
   events:        [],
   panelTasks:    [],
+  panelRequest: 0,
+  panelSearch: "",
+  panelAllocation: "all",
+  panelAssignee: "",
+  panelPlacement: "beside",
+  panelCollapsed: false,
+  panelSize: 280,
   tasks:         [],       // Aufgaben mit due_date für Kalender-Anzeige
   scheduleEntries: [],
   scheduleWarnings: [],
@@ -1259,7 +1266,7 @@ function fetchWindow(from, to) {
 async function loadRange(from, to) {
   const win     = fetchWindow(from, to);
   const calPath = `/calendar?from=${win.from}&to=${win.to}`;
-  const selection = { view: state.view, cursor: state.cursor, from, to };
+  const selection = { view: state.view, cursor: state.cursor, from, to, panelRequest: ++state.panelRequest };
   await calendarLoads.run(
     async () => {
       const [evRes, taskRes, holRes, scheduleRes, panelRes] = await Promise.all([
@@ -1269,7 +1276,7 @@ async function loadRange(from, to) {
         scheduleEnabled()
           ? api.get(`/schedule/entries?from=${from}&to=${to}`).catch(() => ({ data: { entries: [] } }))
           : Promise.resolve({ data: { entries: [] } }),
-        api.get('/tasks/plannable').catch(() => ({ data: [] })),
+        api.get(taskPanelPath(state.panelAssignee)).catch(() => ({ data: [] })),
       ]);
       const offlineSince = navigator.onLine ? null : await getCachedAt(calPath);
       return { evRes, taskRes, holRes, scheduleRes, panelRes, offlineSince };
@@ -1286,7 +1293,7 @@ async function loadRange(from, to) {
         state.loadError = null;
         state.events = (evRes.data ?? []).map(localizeBirthdayEvent);
         applyPendingCalendarDeleteOverlay(state, { freshEvents: true });
-        state.panelTasks = panelRes.data ?? [];
+        if (state.panelRequest === selection.panelRequest) state.panelTasks = panelRes.data ?? [];
         state.tasks = filterTasksForCalendar(taskRes.data ?? []);
         state.holidays = holRes.data ?? [];
         state.scheduleEntries = scheduleRes.data?.entries ?? [];
@@ -1445,6 +1452,16 @@ export async function render(container, { user }) {
   state.today  = todayKey();
   state.cursor = state.today;
   state.view   = defaultCalendarView();
+  state.panelAssignee = '';
+  state.panelSearch = '';
+  state.panelAllocation = 'all';
+  try {
+    const saved = JSON.parse(localStorage.getItem(taskPanelStorageKey(user?.id)) || '{}');
+    state.panelPlacement = saved.placement === 'below' ? 'below' : 'beside';
+    state.panelCollapsed = saved.collapsed === true;
+    state.panelSize = Math.max(TASK_PANEL_SIZE.min, Math.min(TASK_PANEL_SIZE.max, Number(saved.size) || TASK_PANEL_SIZE.initial));
+  } catch { state.panelPlacement = 'beside'; state.panelCollapsed = false; state.panelSize = TASK_PANEL_SIZE.initial; }
+
 
   container.replaceChildren();
   container.insertAdjacentHTML('beforeend', `
@@ -5839,29 +5856,69 @@ async function deleteSingleOccurrence(event) {
 }
 
 
-/** The first task panel deliberately keeps scheduled tasks available. */
+const TASK_PANEL_SIZE = { min: 160, max: 480, initial: 280 };
+
+function taskPanelStorageKey(userId) {
+  return `yuvomi:calendar:task-panel:${userId}`;
+}
+
+function taskPanelPath(assignee) {
+  return `/tasks/plannable${assignee ? `?assigned_to=${encodeURIComponent(assignee)}` : ''}`;
+}
+
+/** Panel discovery uses the permission-filtered public planning list. */
 function renderTaskPanel() {
   const panel = _container.querySelector('#calendar-task-panel');
   if (!panel) return;
-  const enabled = moduleAccess('tasks') === 'write' && moduleAccess('calendar') === 'write';
-  panel.hidden = !enabled;
-  if (!enabled) return;
+  panel.hidden = moduleAccess('tasks') !== 'write' || moduleAccess('calendar') !== 'write';
+  if (panel.hidden) return;
+  const workspace = panel.parentElement;
+  workspace.dataset.taskPlacement = state.panelPlacement;
+  panel.classList.toggle('is-collapsed', state.panelCollapsed);
+  panel.style.setProperty('--task-panel-size', `${state.panelSize}px`);
+  const save = () => {
+    try { localStorage.setItem(taskPanelStorageKey(state.currentUserId), JSON.stringify({ placement: state.panelPlacement, collapsed: state.panelCollapsed, size: state.panelSize })); } catch { /* Storage may be unavailable. */ }
+  };
+  const tasks = state.panelTasks.filter(task => task.title.toLocaleLowerCase().includes(state.panelSearch.toLocaleLowerCase())
+    && (state.panelAllocation === 'all' || !task.session_count));
   panel.replaceChildren();
-  panel.insertAdjacentHTML('beforeend', `<h2 class="calendar-task-panel__title">${esc(t('calendar.taskPanel'))}</h2>
+  panel.insertAdjacentHTML('beforeend', `<div class="calendar-task-panel__header"><h2 class="calendar-task-panel__title">${esc(t('calendar.taskPanel'))}</h2>
+    <button type="button" id="task-panel-collapse" aria-expanded="${!state.panelCollapsed}">${esc(t(state.panelCollapsed ? 'calendar.panelExpand' : 'calendar.panelCollapse'))}</button></div>
+    <div class="calendar-task-panel__content" ${state.panelCollapsed ? 'hidden' : ''}>
+    <label>${esc(t('calendar.panelPlacement'))}<select id="task-panel-placement"><option value="beside">${esc(t('calendar.panelBeside'))}</option><option value="below">${esc(t('calendar.panelBelow'))}</option></select></label>
+    <label>${esc(t('calendar.panelSize'))}<input id="task-panel-size" type="range" min="${TASK_PANEL_SIZE.min}" max="${TASK_PANEL_SIZE.max}" value="${state.panelSize}"></label>
+    <label>${esc(t('calendar.panelSearch'))}<input id="task-panel-search" type="search" value="${esc(state.panelSearch)}"></label>
+    <label>${esc(t('calendar.panelAssignee'))}<select id="task-panel-assignee"><option value="">${esc(t('calendar.panelMine'))}</option>${state.users.filter(u => u.id !== state.currentUserId).map(u => `<option value="${u.id}">${esc(u.display_name)}</option>`).join('')}</select></label>
+    <label>${esc(t('calendar.panelAllocations'))}<select id="task-panel-allocation"><option value="all">${esc(t('calendar.panelAll'))}</option><option value="unscheduled">${esc(t('calendar.panelUnscheduled'))}</option></select></label>
     <p class="calendar-task-panel__hint">${esc(t('calendar.taskDragHint'))}</p>
-    ${state.panelTasks.map(task => `<button type="button" class="calendar-task-card" draggable="true" data-plannable-task-id="${task.id}">
-      <i data-lucide="check-square" class="icon-sm" aria-hidden="true"></i><span>${esc(task.title)}</span>
-    </button>`).join('') || `<p class="calendar-task-panel__hint">${esc(t('tasks.emptyTitle'))}</p>`}`);
+    ${tasks.map(task => `<button type="button" class="calendar-task-card" draggable="true" data-plannable-task-id="${task.id}"><i data-lucide="check-square" class="icon-sm" aria-hidden="true"></i><span>${esc(task.title)}</span></button>`).join('') || `<p class="calendar-task-panel__hint">${esc(t('tasks.emptyTitle'))}</p>`}</div>`);
+  panel.querySelector('#task-panel-collapse').onclick = () => { state.panelCollapsed = !state.panelCollapsed; save(); renderTaskPanel(); };
+  panel.querySelector('#task-panel-placement').value = state.panelPlacement;
+  panel.querySelector('#task-panel-placement').onchange = event => { state.panelPlacement = event.target.value; save(); renderTaskPanel(); };
+  panel.querySelector('#task-panel-size').oninput = event => { state.panelSize = Number(event.target.value); panel.style.setProperty('--task-panel-size', `${state.panelSize}px`); save(); };
+  panel.querySelector('#task-panel-search').oninput = event => {
+    const position = event.target.selectionStart;
+    state.panelSearch = event.target.value; renderTaskPanel();
+    const input = panel.querySelector('#task-panel-search'); input.focus(); input.setSelectionRange(position, position);
+  };
+  panel.querySelector('#task-panel-allocation').value = state.panelAllocation;
+  panel.querySelector('#task-panel-allocation').onchange = event => { state.panelAllocation = event.target.value; renderTaskPanel(); };
+  panel.querySelector('#task-panel-assignee').value = state.panelAssignee;
+  panel.querySelector('#task-panel-assignee').onchange = async event => {
+    const assignee = state.panelAssignee = event.target.value;
+    const request = ++state.panelRequest;
+    try {
+      const res = await api.get(taskPanelPath(assignee));
+      if (state.panelRequest === request && panel.isConnected) { state.panelTasks = res.data; renderTaskPanel(); }
+    } catch (error) { window.yuvomi?.showToast(error.message, 'danger'); }
+  };
   panel.ondragstart = event => {
     const card = event.target.closest('[data-plannable-task-id]');
     if (!card || !window.matchMedia('(min-width: 1024px)').matches) { event.preventDefault(); return; }
     event.dataTransfer.setData('application/x-yuvomi-task', card.dataset.plannableTaskId);
     event.dataTransfer.effectAllowed = 'copy';
   };
-  // Replacing cards resets their click listeners, keeping rerenders independent.
-  for (const card of panel.querySelectorAll('[data-plannable-task-id]')) {
-    card.addEventListener('click', () => openTaskFromCalendar(card.dataset.plannableTaskId));
-  }
+  for (const card of panel.querySelectorAll('[data-plannable-task-id]')) card.onclick = () => openTaskFromCalendar(card.dataset.plannableTaskId);
 }
 
 function bindTaskSessionDrops(container) {
