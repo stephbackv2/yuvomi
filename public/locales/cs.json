@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "Přeskočen {{count}} zamčený úkol.",
         "listLoadError": "Úkoly se nepodařilo načíst.",
         "checklistToggle": "Odškrtnout položku",
-        "checkConflict": "Úkol byl mezitím změněn. Otevřete jej prosím znovu."
+        "checkConflict": "Úkol byl mezitím změněn. Otevřete jej prosím znovu.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} jídla",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 aktivní filtr",
         "filtersReset": "Zrušit všechny filtry",
         "filtersDisplay": "Zobrazení",
-        "agendaDayEmpty": "Nic naplánováno"
+        "agendaDayEmpty": "Nic naplánováno",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Spravovat domácí kategorie poznámek"

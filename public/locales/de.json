@@ -504,7 +504,9 @@
         "tagsSkippedLocked_one": "{{count}} gesperrte Aufgabe übersprungen.",
         "listLoadError": "Aufgaben konnten nicht geladen werden.",
         "checklistToggle": "Eintrag abhaken",
-        "checkConflict": "Die Aufgabe wurde inzwischen geändert. Bitte erneut öffnen."
+        "checkConflict": "Die Aufgabe wurde inzwischen geändert. Bitte erneut öffnen.",
+        "scheduledWork": "Geplante Arbeit",
+        "subtaskProgress": "Unteraufgaben"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} Mahlzeiten",
@@ -1017,7 +1019,12 @@
         "filtersActive_one": "1 Filter aktiv",
         "filtersReset": "Alle Filter aufheben",
         "filtersDisplay": "Darstellung",
-        "agendaDayEmpty": "Nichts geplant"
+        "agendaDayEmpty": "Nichts geplant",
+        "sessionComplete": "Arbeitseinheit abschließen",
+        "sessionAudience": "Personen mit Zugriff auf den gewählten Kalender können diese Arbeitseinheit sehen, auch bei eingeschränkten Aufgaben.",
+        "sessionChooseTarget": "Ziel auswählen",
+        "sessionSynced": "Mit Kalender synchronisiert",
+        "sessionPending": "Kalendersynchronisierung ausstehend"
     },
     "noteCategories": {
         "permissionLabel": "Gemeinsame Notizkategorien verwalten"

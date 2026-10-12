@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "{{count}} tarefa bloqueada ignorada.",
         "listLoadError": "Não foi possível carregar as tarefas.",
         "checklistToggle": "Marcar item",
-        "checkConflict": "A tarefa foi alterada entretanto. Abra-a novamente."
+        "checkConflict": "A tarefa foi alterada entretanto. Abra-a novamente.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} refeições",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 filtro ativo",
         "filtersReset": "Limpar todos os filtros",
         "filtersDisplay": "Apresentação",
-        "agendaDayEmpty": "Nada planeado"
+        "agendaDayEmpty": "Nada planeado",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Gerir categorias de notas do agregado familiar"

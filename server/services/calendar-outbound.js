@@ -108,12 +108,19 @@ export function queueDeletion({ source, calendarExternalId, eventExternalId, obj
 }
 
 export function pendingDeletions(source) {
-  return db.get().prepare(`
-    SELECT id, calendar_external_id, event_external_id, object_url, attempts
-    FROM calendar_pending_deletions
-    WHERE source = ?
-    ORDER BY id
-  `).all(source);
+  const conn = db.get();
+  const hasIntents = conn.prepare('PRAGMA table_info(calendar_pending_deletions)').all().some(column => column.name === 'session_publication_event_id');
+  const rows = conn.prepare(`SELECT id, calendar_external_id, event_external_id, object_url, attempts
+    ${hasIntents ? ', session_publication_event_id, session_publication_target' : ''}
+    FROM calendar_pending_deletions WHERE source = ? ORDER BY id`).all(source);
+  return rows.filter(row => {
+    if (!row.session_publication_event_id) return true;
+    const event = conn.prepare('SELECT * FROM calendar_events WHERE id = ?').get(row.session_publication_event_id);
+    if (!event) return true;
+    const desired = event.session_pending_target ? JSON.parse(event.session_pending_target) : event;
+    const target = JSON.parse(row.session_publication_target);
+    return !Object.entries(target).every(([key, value]) => desired[key] === value);
+  });
 }
 
 export function pendingDeletionCount(source) {

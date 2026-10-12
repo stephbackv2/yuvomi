@@ -504,7 +504,9 @@
         "tagsSkippedLocked_one": "{{count}} وظیفهٔ قفل‌شده رد شد.",
         "listLoadError": "کارها بارگذاری نشدند.",
         "checklistToggle": "علامت‌زدن مورد",
-        "checkConflict": "وظیفه در این میان تغییر کرده است. لطفاً دوباره آن را باز کنید."
+        "checkConflict": "وظیفه در این میان تغییر کرده است. لطفاً دوباره آن را باز کنید.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} وعده",
@@ -1017,7 +1019,12 @@
         "filtersActive_one": "۱ فیلتر فعال",
         "filtersReset": "برداشتن همه فیلترها",
         "filtersDisplay": "نمایش",
-        "agendaDayEmpty": "چیزی برنامه‌ریزی نشده"
+        "agendaDayEmpty": "چیزی برنامه‌ریزی نشده",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "مدیریت دسته‌بندی‌های یادداشت خانوادگی"

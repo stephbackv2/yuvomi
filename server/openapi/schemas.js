@@ -15,6 +15,7 @@ export const schemas = {
         TaskSessionCreate: {
           type: 'object', required: ['start_datetime'],
           properties: {
+            publication_target: { type: 'string', examples: ['local', 'google:primary', 'caldav:1|https://dav.example/calendar', 'outlook:1|calendar'], description: 'Explicit destination, required without a writable assignee default or for restricted visibility.' },
             start_datetime: { type: 'string', description: 'ISO date and time, with an explicit offset or wall time in tzid.', examples: ['2026-10-05T10:15', '2026-10-05T08:15:00Z'] },
             end_datetime: { type: 'string', description: 'Positive interval end; overrides duration_minutes.' },
             duration_minutes: { type: 'number', exclusiveMinimum: 0, default: 30, description: 'Elapsed duration when end_datetime is omitted.' },
@@ -24,6 +25,7 @@ export const schemas = {
         TaskSessionUpdate: {
           type: 'object', additionalProperties: false,
           properties: {
+            publication_target: { type: 'string', examples: ['local', 'google:primary', 'caldav:1|https://dav.example/calendar', 'outlook:1|calendar'], description: 'Explicit per-session destination. Required without a writable assignee default and for restricted visibility.' },
             start_datetime: { type: 'string', description: 'ISO instant or wall time in tzid; omitted keeps the start.' },
             end_datetime: { type: 'string', description: 'Positive interval end; overrides duration_minutes.' },
             duration_minutes: { type: 'number', exclusiveMinimum: 0, description: 'Elapsed duration; omitted preserves the existing duration.' },
@@ -473,6 +475,8 @@ export const schemas = {
           properties: {
             task_id: { type: ['integer', 'null'], description: 'Parent task for a work allocation; otherwise null.' },
             session_status: { type: ['string', 'null'], enum: ['unfinished', 'completed', null] },
+            session_completed_at: { type: ['string', 'null'], readOnly: true, description: 'First shared completion timestamp.' },
+            session_completed_by: { type: ['integer', 'null'], readOnly: true, description: 'First acting user; null for unfinished sessions or removed users.' },
             session_assignment_mode: { type: ['string', 'null'], enum: ['inherited', 'override', null] },
             id: { type: 'integer' },
             revision: {

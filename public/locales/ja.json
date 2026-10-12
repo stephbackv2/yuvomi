@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "ロックされた {{count}} 件のタスクをスキップしました。",
         "listLoadError": "タスクを読み込めませんでした。",
         "checklistToggle": "項目にチェックを入れる",
-        "checkConflict": "タスクはその間に変更されました。もう一度開いてください。"
+        "checkConflict": "タスクはその間に変更されました。もう一度開いてください。",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}}件の食事",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "フィルター 1 件が有効",
         "filtersReset": "すべてのフィルターを解除",
         "filtersDisplay": "表示",
-        "agendaDayEmpty": "予定なし"
+        "agendaDayEmpty": "予定なし",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "世帯のメモカテゴリーを管理"

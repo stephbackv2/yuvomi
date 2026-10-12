@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "{{count}} låst uppgift hoppades över.",
         "listLoadError": "Uppgifter kunde inte laddas.",
         "checklistToggle": "Bocka av post",
-        "checkConflict": "Uppgiften har ändrats under tiden. Öppna den igen."
+        "checkConflict": "Uppgiften har ändrats under tiden. Öppna den igen.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} måltider",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 filter aktivt",
         "filtersReset": "Rensa alla filter",
         "filtersDisplay": "Visning",
-        "agendaDayEmpty": "Inget planerat"
+        "agendaDayEmpty": "Inget planerat",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Hantera hushållets anteckningskategorier"

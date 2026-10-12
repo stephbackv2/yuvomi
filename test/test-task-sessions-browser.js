@@ -45,6 +45,9 @@ async function drag(page, taskId, view) {
   await card.scrollIntoView();
   const response = page.waitForResponse(res => res.url().endsWith(`/tasks/${taskId}/sessions`) && res.request().method() === 'POST');
   await page.mouse.dragAndDrop(await card.clickablePoint(), point, { delay: 100 });
+  await page.waitForSelector('#task-session-target:not([disabled])');
+  await page.select('#task-session-target', 'local');
+  await page.click('#task-session-form [type="submit"]');
   const res = await response;
   assert.equal(res.status(), 201, await res.text());
   const session = (await res.json()).data;
@@ -199,6 +202,10 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
       if (new URL(req.url()).pathname === '/sw.js') await req.abort();
       else await req.continue();
     });
+    if (await page.$('#task-session-target')) {
+      await page.waitForSelector('#task-session-target:not([disabled])');
+      await page.select('#task-session-target', 'local');
+    }
     await page.click('#task-session-form [type="submit"]');
     await startedSave;
     try {
@@ -229,6 +236,10 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
     await page.$eval('#task-session-duration', el => { el.value = '90'; });
     const detailRead = calendarRead(page);
     const detailResponse = page.waitForResponse(res => res.url().endsWith(`/tasks/${parent.id}/sessions/${first.id}`) && res.request().method() === 'PUT');
+    if (await page.$('#task-session-target')) {
+      await page.waitForSelector('#task-session-target:not([disabled])');
+      await page.select('#task-session-target', 'local');
+    }
     await page.click('#task-session-form [type="submit"]');
     assert.equal((await detailResponse).status(), 200);
     await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
@@ -262,6 +273,7 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
     await gotoRoute(page, '/calendar');
     assert.equal(await page.$eval('#calendar-task-panel', el => getComputedStyle(el).display), 'none');
     await page.waitForSelector(`[data-task-session][data-id="${first.id}"]`);
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 60000)));
     for (const provider of ['mealie', 'tandoor']) {
       await gotoRoute(page, '/meals');
       await page.click(`.meal-card[data-meal-id="${fixture[provider]}"] .meal-card__open`);
@@ -272,8 +284,8 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
       await page.waitForFunction(() => !document.querySelector('#shared-modal-overlay'));
     }
     assert.equal((await request(page, 'get', '/tasks?include_future=1')).data.filter(t => t.recurrence_origin_id === parent.id).length, 0);
-    const past = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { start_datetime: '2001-01-01T10:00', tzid: 'UTC' })).data;
-    const future = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { start_datetime: '2090-01-01T10:00', tzid: 'UTC' })).data;
+    const past = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: '2001-01-01T10:00', tzid: 'UTC' })).data;
+    const future = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: '2090-01-01T10:00', tzid: 'UTC' })).data;
     await request(page, 'patch', `/tasks/${parent.id}/status`, { status: 'done' });
     const history = (await request(page, 'get', `/tasks/${parent.id}/sessions`)).data;
     assert.ok(history.some(session => session.id === past.id));
@@ -281,6 +293,35 @@ test('actual desktop panel schedules durable overlapping shared sessions, opens 
     await request(page, 'delete', `/tasks/${parent.id}`);
     const remaining = (await request(page, 'get', `/calendar?from=2001-01-01&to=2090-01-02`)).data;
     assert.ok(!remaining.some(session => session.task_id === parent.id));
+  } catch (error) { console.error(error); throw error; }
+  finally { await harness.close(); }
+});
+
+test('agenda checkboxes complete shared sessions and show scheduled work separately from subtasks', async () => {
+  const harness = await startHarness({ seed });
+  try {
+    const page = await openPage(harness, { device: 'desktop', locale: 'en' });
+    await page.setBypassServiceWorker(true);
+    const parent = (await request(page, 'post', '/tasks', { title: 'Weighted browser work' })).data;
+    await request(page, 'post', '/tasks', { title: 'Independent child', parent_task_id: parent.id });
+    const a = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: `${today}T10:00`, duration_minutes: 30, tzid: 'UTC' })).data;
+    const b = (await request(page, 'post', `/tasks/${parent.id}/sessions`, { publication_target: 'local', start_datetime: `${today}T12:00`, duration_minutes: 90, tzid: 'UTC' })).data;
+    await page.evaluate(() => localStorage.setItem('yuvomi:calendar:view', 'agenda'));
+    await gotoRoute(page, '/calendar');
+    const completed = page.waitForResponse(res => res.url().endsWith(`/sessions/${a.id}/complete`) && res.request().method() === 'POST');
+    await page.click(`[data-session-complete="${a.id}"]`);
+    assert.equal((await completed).status(), 200);
+    await page.waitForSelector(`[data-session-complete="${a.id}"]:checked:disabled`);
+    assert.equal((await request(page, 'get', `/tasks/${parent.id}`)).data.scheduled_work.percentage, 25);
+    await page.click(`.agenda-event[data-id="${a.id}"]`);
+    await page.waitForSelector('.task-sessions [data-scheduled-work]');
+    assert.match(await page.$eval('.task-sessions', el => el.textContent), /Scheduled work: 25%/);
+    assert.match(await page.$eval('.task-sessions', el => el.textContent), /Subtasks: 0\/1/);
+    assert.equal(await page.$(`[data-session-edit="${a.id}"]`), null);
+    const finished = page.waitForResponse(res => res.url().endsWith(`/sessions/${b.id}/complete`) && res.request().method() === 'POST');
+    await page.click(`.task-sessions [data-session-complete="${b.id}"]`);
+    assert.equal((await finished).status(), 200);
+    assert.equal((await request(page, 'get', `/tasks/${parent.id}`)).data.status, 'done');
   } catch (error) { console.error(error); throw error; }
   finally { await harness.close(); }
 });

@@ -4,6 +4,7 @@
  * Abhängigkeiten: express, server/db.js
  */
 
+import { attachTaskSessionProgress } from '../services/task-session-progress.js';
 import { createLogger } from '../logger.js';
 import express from 'express';
 import taskSessionsRouter from './task-sessions.js';
@@ -837,7 +838,7 @@ router.get('/', (req, res) => {
     `;
 
     const rows = db.get().prepare(sql).all(...params).map(task => ({ ...task, subtasks: JSON.parse(task.subtasks || '[]') })).map(addAssignedUsers);
-    res.json({ data: attachTags(attachDocumentCounts(rows, me)) });
+    res.json({ data: attachTags(attachDocumentCounts(attachTaskSessionProgress(rows), me)) });
   } catch (err) {
     log.error('GET / error:', err);
     res.status(500).json({ error: 'Internal server error.', code: 500 });
@@ -864,6 +865,7 @@ router.get('/:id', (req, res) => {
     if (!task) return res.status(404).json({ error: 'Task not found.', code: 404 });
 
     addAssignedUsers(task);
+    attachTaskSessionProgress([task]);
     task.subtasks = loadSubtasks(task.id, me);
     attachDocumentCounts([task], me);
     // Die verknüpften Dokumente beim Namen, nicht nur gezählt (#733). Die
@@ -1012,6 +1014,7 @@ router.post('/', (req, res) => {
     `).get(taskId);
 
     addAssignedUsers(task);
+    attachTaskSessionProgress([task]);
     attachTags([task]);
     res.status(201).json({ data: task });
     if (syncTarget) pushToCalDAV('Neue Aufgabe');
@@ -1199,6 +1202,7 @@ router.put('/:id', (req, res) => {
     })();
 
     addAssignedUsers(updated);
+    attachTaskSessionProgress([updated]);
     updated.subtasks = loadSubtasks(updated.id, req.authUserId || req.session.userId);
 
     res.json({ data: updated });

@@ -1,7 +1,7 @@
 /** Scheduling boundaries share task visibility and require both module rights. */
 import express from 'express';
 import { createLogger } from '../logger.js';
-import { plannableTasks, readTaskSessions, scheduleTaskSession, updateTaskSession, removeTaskSession, sessionModuleAllowed } from '../services/task-sessions.js';
+import { taskSessionTargets, completeTaskSession, plannableTasks, readTaskSessions, scheduleTaskSession, updateTaskSession, removeTaskSession, sessionModuleAllowed } from '../services/task-sessions.js';
 import * as db from '../db.js';
 import { serializeEvent, getUserId } from './calendar/helpers.js';
 const log = createLogger('TaskSessions');
@@ -19,6 +19,10 @@ router.get('/plannable', (req, res) => {
   try { if (allowed(req, res, 'read')) res.json({ data: plannableTasks(getUserId(req), req.query.assigned_to === undefined ? getUserId(req) : Number(req.query.assigned_to)) }); }
   catch (error) { sendError(res, error); }
 });
+router.get('/:id/session-targets', (req, res) => {
+  try { if (allowed(req, res, 'read')) res.json({ data: taskSessionTargets(Number(req.params.id), getUserId(req)) }); }
+  catch (error) { sendError(res, error); }
+});
 router.get('/:id/sessions', (req, res) => {
   try { if (allowed(req, res, 'read')) res.json({ data: readTaskSessions(Number(req.params.id), getUserId(req)).map(e => serializeEvent(e, db.get())) }); }
   catch (error) { sendError(res, error); }
@@ -28,6 +32,13 @@ router.post('/:id/sessions', (req, res) => {
     if (!allowed(req, res, 'write')) return;
     const event = scheduleTaskSession({ taskId: Number(req.params.id), actor: getUserId(req), body: req.body || {} });
     res.status(201).json({ data: serializeEvent(event, db.get()) });
+  } catch (error) { sendError(res, error); }
+});
+router.post('/:id/sessions/:sessionId/complete', (req, res) => {
+  try {
+    if (!allowed(req, res, 'write')) return;
+    const event = completeTaskSession({ taskId: Number(req.params.id), sessionId: Number(req.params.sessionId), actor: getUserId(req) });
+    res.json({ data: serializeEvent(event, db.get()) });
   } catch (error) { sendError(res, error); }
 });
 router.put('/:id/sessions/:sessionId', (req, res) => {

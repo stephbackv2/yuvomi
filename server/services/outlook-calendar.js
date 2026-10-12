@@ -15,7 +15,9 @@ import { createLogger } from '../logger.js';
 const log = createLogger('Outlook');
 
 import crypto from 'node:crypto';
+import { queueDeletion, pendingDeletions, dropDeletion, handleDeletionError } from './calendar-outbound.js';
 import * as db from '../db.js';
+import { sessionPublicationCandidate, finishSessionPublication, sessionPublicationDirty } from './session-publication.js';
 import { parseRRule } from './recurrence.js';
 import { outboundEvent } from './outbound-dtstart.js';
 import { visibilityWhere } from './visibility.js';
@@ -618,7 +620,7 @@ function collectCandidates(conn, account) {
     const rows = conn.prepare(`
       SELECT e.*, ${ASSIGNEE_NAMES_SQL}
       FROM calendar_events e
-      WHERE e.external_source = 'local'
+      WHERE e.external_source = 'local' AND e.task_id IS NULL
         AND ${visibilityWhere('e', 'event_assignments', 'event_id')}
     `).all(account.owner_user_id, account.owner_user_id);
     for (const event of rows) {
@@ -629,9 +631,10 @@ function collectCandidates(conn, account) {
   const explicit = conn.prepare(`
     SELECT e.*, ${ASSIGNEE_NAMES_SQL}
     FROM calendar_events e
-    WHERE e.external_source = 'local' AND e.target_outlook_account_id = ?
-  `).all(account.id);
-  for (const event of explicit) {
+    WHERE (e.external_source = 'local' AND e.target_outlook_account_id = ?) OR json_extract(e.session_pending_target, '$.target_outlook_account_id') = ?
+  `).all(account.id, account.id);
+  for (const original of explicit) {
+    const event = sessionPublicationCandidate(original, 'outlook') || { ...original, session_pending_target: null, retained_session_publication: true };
     candidates.set(event.id, { event, calendarId: event.target_outlook_calendar_id });
   }
 
@@ -669,6 +672,18 @@ async function fetchRemoteEventStates(calendarId, accessToken, fetchImpl = fetch
  * Kein Inbound. Konto-Fehler brechen nur das jeweilige Konto ab.
  * @param {{fetchImpl?: typeof fetch}} [options] - fetch injizierbar (Tests)
  */
+/** A lost Graph create response still leaves a durable cleanup/retry identity. */
+async function createPushedEvent(account, calendarId, event, payload, accessToken, fetchImpl) {
+  const calendarExternalId = `${account.id}|${calendarId}`;
+  const intentId = `pending:${payload.transactionId}`;
+  if (event.task_id) queueDeletion({ source: 'outlook', calendarExternalId, eventExternalId: intentId,
+    objectUrl: JSON.stringify({ event_id: event.id, payload }) });
+  const created = await graphJson(`/me/calendars/${encodeURIComponent(calendarId)}/events`, accessToken, { method: 'POST', body: payload }, fetchImpl);
+  if (event.task_id) db.get().prepare('DELETE FROM calendar_pending_deletions WHERE source = ? AND calendar_external_id = ? AND event_external_id = ?')
+    .run('outlook', calendarExternalId, intentId);
+  return created;
+}
+
 async function sync({ fetchImpl = fetch } = {}) {
   const accounts = getAllAccounts();
   if (accounts.length === 0) {
@@ -711,6 +726,25 @@ async function sync({ fetchImpl = fetch } = {}) {
     }
     try {
       const accessToken = await ensureAccessToken(account, fetchImpl);
+      for (const tombstone of pendingDeletions('outlook').filter(item => item.calendar_external_id.startsWith(`${account.id}|`))) {
+        try {
+          let remoteId = tombstone.event_external_id;
+          if (remoteId.startsWith('pending:')) {
+            const intent = JSON.parse(tombstone.object_url);
+            const current = conn.prepare('SELECT * FROM calendar_events WHERE id = ?').get(intent.event_id);
+            const desired = current?.session_pending_target ? JSON.parse(current.session_pending_target) : current;
+            const calendarId = tombstone.calendar_external_id.slice(tombstone.calendar_external_id.indexOf('|') + 1);
+            if (desired?.target_outlook_account_id === account.id && desired.target_outlook_calendar_id === calendarId) continue;
+            // Repeating the original transaction retrieves its identity even
+            // when the first HTTP response never reached this process.
+            const recovered = await graphJson(`/me/calendars/${encodeURIComponent(calendarId)}/events`, accessToken, { method: 'POST', body: intent.payload }, fetchImpl);
+            remoteId = recovered.id;
+          }
+          const response = await graphRequest(`/me/events/${encodeURIComponent(remoteId)}`, accessToken, { method: 'DELETE' }, fetchImpl);
+          if (!response.ok && response.status !== 404 && response.status !== 410) throw Object.assign(new Error(`HTTP ${response.status}`), { status: response.status });
+          dropDeletion(tombstone.id); deleted++;
+        } catch (error) { handleDeletionError(error, tombstone, 'Outlook'); }
+      }
       const candidates = collectCandidates(conn, account);
       const linkRows = conn.prepare(
         'SELECT * FROM outlook_event_links WHERE account_id = ?'
@@ -778,6 +812,8 @@ async function sync({ fetchImpl = fetch } = {}) {
         const assigneeNames = event.assignee_names_json ? JSON.parse(event.assignee_names_json) : [];
         const payload = localEventToGraph(event, assigneeNames);
         const hash = contentHash(payload, calendarId);
+        const createPayload = event.task_id ? { ...payload, transactionId: crypto.createHash('sha256')
+          .update(`${event.session_publication_uid}|${account.id}|${calendarId}`).digest('hex') } : payload;
 
         // Drift gegen den zuletzt selbst geschriebenen changeKey. Ein Link ohne
         // gespeicherten Key (Alt-Bestand) wird einmalig zurückgesetzt und trägt
@@ -789,12 +825,16 @@ async function sync({ fetchImpl = fetch } = {}) {
 
         try {
           if (!link) {
-            const created = await graphJson(
-              `/me/calendars/${encodeURIComponent(calendarId)}/events`,
-              accessToken, { method: 'POST', body: payload }, fetchImpl
-            );
+            const created = await createPushedEvent(account, calendarId, event, createPayload, accessToken, fetchImpl);
             insLink.run(event.id, account.id, calendarId, created.id, hash, created.changeKey ?? null);
             pushed++;
+          } else if (event.session_pending_target && link.outlook_calendar_id !== calendarId) {
+            const created = await createPushedEvent(account, calendarId, event, createPayload, accessToken, fetchImpl);
+            if (!finishSessionPublication(event, { source: 'outlook', calendarExternalId: `${account.id}|${calendarId}`, eventExternalId: created.id })) continue;
+            queueDeletion({ source: 'outlook', calendarExternalId: `${account.id}|${link.outlook_calendar_id}`, eventExternalId: link.outlook_event_id });
+            insLink.run(event.id, account.id, calendarId, created.id, hash, created.changeKey ?? null);
+            event.session_pending_target = null;
+            updated++;
           } else if (link.outlook_calendar_id !== calendarId) {
             // Zielkalender gewechselt → Delete + Create (Graph-"move" wäre ein
             // eigener Endpoint mit eigenen Fehlerpfaden — Delete+Create genügt).
@@ -803,18 +843,12 @@ async function sync({ fetchImpl = fetch } = {}) {
               accessToken, { method: 'DELETE' }, fetchImpl
             );
             if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status} on delete`);
-            const created = await graphJson(
-              `/me/calendars/${encodeURIComponent(calendarId)}/events`,
-              accessToken, { method: 'POST', body: payload }, fetchImpl
-            );
+            const created = await createPushedEvent(account, calendarId, event, createPayload, accessToken, fetchImpl);
             insLink.run(event.id, account.id, calendarId, created.id, hash, created.changeKey ?? null);
             updated++;
           } else if (remoteMissing) {
             // In Outlook von Hand gelöscht → Yuvomi ist Source of Truth: neu anlegen.
-            const created = await graphJson(
-              `/me/calendars/${encodeURIComponent(calendarId)}/events`,
-              accessToken, { method: 'POST', body: payload }, fetchImpl
-            );
+            const created = await createPushedEvent(account, calendarId, event, createPayload, accessToken, fetchImpl);
             insLink.run(event.id, account.id, calendarId, created.id, hash, created.changeKey ?? null);
             updated++;
           } else if (link.content_hash !== hash || remoteDrifted) {
@@ -828,22 +862,24 @@ async function sync({ fetchImpl = fetch } = {}) {
               // Fallback ohne Drift-Erkennung (Listing fehlgeschlagen): Remote
               // von Hand gelöscht → neu anlegen.
               if (err.status !== 404) throw err;
-              const created = await graphJson(
-                `/me/calendars/${encodeURIComponent(calendarId)}/events`,
-                accessToken, { method: 'POST', body: payload }, fetchImpl
-              );
+              const created = await createPushedEvent(account, calendarId, event, createPayload, accessToken, fetchImpl);
               insLink.run(event.id, account.id, calendarId, created.id, hash, created.changeKey ?? null);
             }
             updated++;
           }
+          const latestLink = selLink.get(event.id, account.id);
+          if (!event.retained_session_publication && !finishSessionPublication(event, latestLink ? {
+            source: 'outlook', calendarExternalId: `${account.id}|${calendarId}`, eventExternalId: latestLink.outlook_event_id,
+          } : null)) continue;
           conn.prepare(`
             UPDATE calendar_events
-            SET outbound_dirty = 0, outbound_attempts = 0, outbound_move_to = NULL
-            WHERE id = ? AND external_source = 'local'
-          `).run(event.id);
+            SET external_source = 'local', external_calendar_id = NULL, external_object_url = NULL, calendar_ref_id = NULL, outbound_dirty = ?, outbound_attempts = 0, outbound_move_to = NULL, sync_state = 'clean', sync_error = NULL
+            WHERE id = ?
+          `).run(sessionPublicationDirty(event), event.id);
           // Hash unverändert + kein Drift → No-Op (keine weitere Anfrage).
         } catch (err) {
           log.error(`Push failed for event ${event.id} (account ${account.id}):`, err.message);
+          if (event.task_id) conn.prepare("UPDATE calendar_events SET sync_state = 'error', sync_error = ? WHERE id = ?").run(err.message, event.id);
           if (link) setLinkError.run(err.message, event.id, account.id);
         }
       }

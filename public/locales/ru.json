@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "Пропущена {{count}} заблокированная задача.",
         "listLoadError": "Не удалось загрузить задачи.",
         "checklistToggle": "Отметить пункт",
-        "checkConflict": "Задача была изменена. Откройте её заново."
+        "checkConflict": "Задача была изменена. Откройте её заново.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} приёма пищи",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 активный фильтр",
         "filtersReset": "Снять все фильтры",
         "filtersDisplay": "Отображение",
-        "agendaDayEmpty": "Ничего не запланировано"
+        "agendaDayEmpty": "Ничего не запланировано",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Управлять семейными категориями заметок"

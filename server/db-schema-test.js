@@ -1198,6 +1198,31 @@ const MIGRATIONS_SQL = {
   `,
   199: `ALTER TABLE calendar_events ADD COLUMN task_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE;
     ALTER TABLE calendar_events ADD COLUMN session_status TEXT;`,
+  200: `ALTER TABLE calendar_events ADD COLUMN session_completed_at TEXT;
+    ALTER TABLE calendar_events ADD COLUMN session_completed_by INTEGER REFERENCES users(id) ON DELETE SET NULL;`,
+  201: `ALTER TABLE calendar_events ADD COLUMN session_publication_uid TEXT;
+      UPDATE calendar_events SET session_publication_uid = lower(hex(randomblob(16))) WHERE task_id IS NOT NULL;
+      ALTER TABLE calendar_events ADD COLUMN session_pending_target TEXT;
+      ALTER TABLE calendar_pending_deletions ADD COLUMN session_publication_event_id INTEGER;
+      ALTER TABLE calendar_pending_deletions ADD COLUMN session_publication_target TEXT;
+      CREATE TRIGGER task_session_remote_delete BEFORE DELETE ON calendar_events WHEN OLD.task_id IS NOT NULL
+      AND (OLD.external_source IN ('google', 'caldav') OR (OLD.external_source = 'local' AND (OLD.target_google_calendar_id IS NOT NULL OR OLD.target_caldav_account_id IS NOT NULL))) AND OLD.external_calendar_id IS NOT NULL
+      BEGIN
+        INSERT OR IGNORE INTO calendar_pending_deletions (source, calendar_external_id, event_external_id, object_url)
+        VALUES (CASE WHEN OLD.external_source = 'local' THEN CASE WHEN OLD.target_google_calendar_id IS NOT NULL THEN 'google' ELSE 'caldav' END ELSE OLD.external_source END, COALESCE((SELECT external_id FROM external_calendars WHERE id = OLD.calendar_ref_id),
+          OLD.target_google_calendar_id, OLD.target_caldav_calendar_url, ''), OLD.external_calendar_id, OLD.external_object_url);
+      END;
+      CREATE TRIGGER task_session_pending_remote_delete BEFORE DELETE ON calendar_events
+      WHEN OLD.task_id IS NOT NULL AND OLD.session_pending_target IS NOT NULL
+      BEGIN
+        INSERT OR IGNORE INTO calendar_pending_deletions (source, calendar_external_id, event_external_id, object_url)
+        SELECT 'google', json_extract(OLD.session_pending_target, '$.target_google_calendar_id'), replace(OLD.session_publication_uid, '-', ''), NULL
+        WHERE json_extract(OLD.session_pending_target, '$.target_google_calendar_id') IS NOT NULL;
+        INSERT OR IGNORE INTO calendar_pending_deletions (source, calendar_external_id, event_external_id, object_url)
+        SELECT 'caldav', json_extract(OLD.session_pending_target, '$.target_caldav_calendar_url'), OLD.session_publication_uid || '@yuvomi.local',
+          rtrim(json_extract(OLD.session_pending_target, '$.target_caldav_calendar_url'), '/') || '/' || OLD.session_publication_uid || '@yuvomi.local.ics'
+        WHERE json_extract(OLD.session_pending_target, '$.target_caldav_account_id') IS NOT NULL;
+      END;`,
 };
 
 export { MIGRATIONS_SQL };

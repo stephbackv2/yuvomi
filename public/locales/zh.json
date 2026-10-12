@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "已跳过 {{count}} 个锁定的任务。",
         "listLoadError": "无法加载任务。",
         "checklistToggle": "勾选条目",
-        "checkConflict": "任务已被修改，请重新打开。"
+        "checkConflict": "任务已被修改，请重新打开。",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} 餐",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 个筛选条件生效",
         "filtersReset": "清除所有筛选",
         "filtersDisplay": "显示",
-        "agendaDayEmpty": "没有安排"
+        "agendaDayEmpty": "没有安排",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "管理家庭笔记分类"

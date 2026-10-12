@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "Пропущено {{count}} заблоковане завдання.",
         "listLoadError": "Не вдалося завантажити завдання.",
         "checklistToggle": "Позначити пункт",
-        "checkConflict": "Завдання тим часом змінено. Відкрийте його ще раз."
+        "checkConflict": "Завдання тим часом змінено. Відкрийте його ще раз.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} прийоми їжі",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 активний фільтр",
         "filtersReset": "Зняти всі фільтри",
         "filtersDisplay": "Відображення",
-        "agendaDayEmpty": "Нічого не заплановано"
+        "agendaDayEmpty": "Нічого не заплановано",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Керувати сімейними категоріями нотаток"

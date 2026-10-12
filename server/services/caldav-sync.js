@@ -8,6 +8,7 @@ import { createLogger } from '../logger.js';
 const log = createLogger('CalDAV');
 
 import * as db from '../db.js';
+import { sessionPublicationCandidate, finishSessionPublication, rememberSessionPublication, sessionPublicationDirty } from './session-publication.js';
 import { decodeHtmlEntities } from '../utils/html-entities.js';
 import * as editOperations from './calendar-edit-operations.js';
 import { recoverFollowingCalendarEditAfterReadback } from './calendar-edit.js';
@@ -45,7 +46,7 @@ import {
 export { toICSDatetime };
 
 function buildCalDAVICS(event, householdZone = null) {
-  const uid  = `oikos-${event.id}@oikos.local`;
+  const uid  = event.task_id ? `${event.session_publication_uid}@yuvomi.local` : `oikos-${event.id}@oikos.local`;
   const now  = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
   // Die Zeiten und ihre Zone bestimmt eventDateTimeFields; bis #938 stand hier
   // ein blankes `DTSTART:20260830T100000`, das keinen Zeitpunkt bezeichnet,
@@ -816,7 +817,7 @@ async function sync({ createClient } = {}) {
   // großen Kalendern spürbar Zeit und verkürzt damit das synchrone Verarbeitungsfenster.
   const conn = db.get();
   const selExistingEvent = conn.prepare(
-    `SELECT id, outbound_dirty FROM calendar_events WHERE external_calendar_id = ? AND external_source = 'caldav'`
+    `SELECT id, outbound_dirty, task_id FROM calendar_events WHERE external_calendar_id = ? AND (external_source = 'caldav' OR (task_id IS NOT NULL AND external_source = 'local' AND target_caldav_account_id IS NOT NULL))`
   );
   // Offene Löschungen einmal je Lauf, nicht je eingehendem Termin.
   const pendingDeletionUids = outbound.pendingDeletionUids('caldav');
@@ -1043,7 +1044,7 @@ async function sync({ createClient } = {}) {
 
               // Eine lokale Bearbeitung, die noch auf ihren Push wartet, darf der
               // Inbound nicht mit dem alten Serverstand überschreiben (#593).
-              if (existing?.outbound_dirty || activeScopedOperations.some((operation) => (
+              if (existing?.task_id || existing?.outbound_dirty || activeScopedOperations.some((operation) => (
                 activeCalDAVOperationTouches(operation, ev.uid, selCal.calendar_url)
               ))) {
                 accountEventCount++;
@@ -1122,10 +1123,10 @@ async function sync({ createClient } = {}) {
           }
           const removed = pruneDeletedEvents(db.get(), {
             calRefId, calendarUids, accountUids, source: 'caldav', calendarName,
-            protectedEventIds: new Set([...activeScopedOperations, ...pendingReadbacks].flatMap((operation) => [
+            protectedEventIds: new Set([...db.get().prepare('SELECT id FROM calendar_events WHERE task_id IS NOT NULL').all().map(event => event.id), ...[...activeScopedOperations, ...pendingReadbacks].flatMap((operation) => [
               operation.event_id, operation.payload?.parent_event_id,
               ...(operation.payload?.split?.exception_operations || []).map((item) => item.local_event_id),
-            ]).filter(Boolean)),
+            ]).filter(Boolean)]),
           });
           if (removed > 0) {
             log.info(`Calendar "${calendarName}": removed ${removed} event(s) deleted on the server.`);
@@ -1155,13 +1156,15 @@ async function sync({ createClient } = {}) {
       // Outbound sync: Yuvomi → CalDAV (events with target_caldav_account_id)
       const localEvents = db.get().prepare(`
         SELECT * FROM calendar_events
-        WHERE external_source = 'local' AND target_caldav_account_id = ?
-      `).all(account.id);
+        WHERE (external_source = 'local' AND target_caldav_account_id = ?) OR json_extract(session_pending_target, '$.target_caldav_account_id') = ?
+      `).all(account.id, account.id);
 
       // Einmal je Lauf: die Zone, an der naive Zeiten haengen (#938).
       const householdZone = householdTimeZone(db.get());
 
-      for (const event of localEvents) {
+      for (const original of localEvents) {
+        const event = sessionPublicationCandidate(original, 'caldav');
+        if (!event) continue;
         try {
           // Find target calendar
           const targetCal = serverCalendars.find(sc => sc.url === event.target_caldav_calendar_url);
@@ -1171,24 +1174,44 @@ async function sync({ createClient } = {}) {
             continue;
           }
 
-          const uid     = `oikos-${event.id}@oikos.local`;
+          const uid     = event.task_id ? `${event.session_publication_uid}@yuvomi.local` : `oikos-${event.id}@oikos.local`;
           const icsData = buildCalDAVICS(event, householdZone);
 
-          // Upload to CalDAV
-          await client.createCalendarObject({
-            calendar: targetCal,
-            filename: `${uid}.ics`,
-            iCalString: icsData,
-          });
+          const objectUrl = `${String(targetCal.url).replace(/\/?$/, '/')}${uid}.ics`;
+          if (event.task_id && !event.session_pending_target) db.get().prepare('UPDATE calendar_events SET external_calendar_id = ?, external_object_url = ? WHERE id = ?').run(uid, objectUrl, event.id);
+          rememberSessionPublication(event, { source: 'caldav', calendarExternalId: event.target_caldav_calendar_url, eventExternalId: uid, objectUrl });
+          // tsdav creates with If-None-Match: *. A lost response therefore
+          // retries as 412; read back our stable UID and update with its ETag.
+          if (event.task_id && caldavWriteCapability(targetCal).writable !== true) {
+            throw Object.assign(new Error('Session calendar is not writable.'), { status: 403 });
+          }
+          let response;
+          try {
+            response = await client.createCalendarObject({ calendar: targetCal, filename: `${uid}.ics`, iCalString: icsData });
+          } catch (error) {
+            const status = Number(error.status ?? error.code ?? error.response?.status);
+            if (!event.task_id || ![409, 412].includes(status)) throw error;
+            response = { ok: false, status };
+          }
+          if (event.task_id && response?.ok === false) {
+            if (![409, 412].includes(response.status)) throw Object.assign(new Error(`HTTP ${response.status} on session creation`), { status: response.status });
+            const existing = (await client.fetchCalendarObjects({ calendar: targetCal, objectUrls: [objectUrl] }))
+              .find(object => object.url === objectUrl);
+            if (!existing || !parseICS(existing.data || '').some(item => item.uid === uid)) {
+              throw Object.assign(new Error('Session resource identity could not be verified.'), { status: 409 });
+            }
+            const updated = await client.updateCalendarObject({ calendarObject: { ...existing, data: icsData } });
+            if (updated?.ok === false) throw Object.assign(new Error(`HTTP ${updated.status} on session retry`), { status: updated.status });
+          }
 
           // Objekt-URL und Kalenderzuordnung festhalten: ohne sie wäre der frisch
           // hochgeladene Termin für spätere Änderungen und Löschungen unerreichbar,
           // bis ihn der nächste Inbound-Lauf wiederfindet (#593).
-          const objectUrl = `${String(targetCal.url).replace(/\/?$/, '/')}${uid}.ics`;
           const calRefId  = upsertExternalCalendar(
             'caldav', event.target_caldav_calendar_url,
             targetCal.displayName || event.target_caldav_calendar_url, null
           );
+          if (!finishSessionPublication(event, { source: 'caldav', calendarExternalId: event.target_caldav_calendar_url, eventExternalId: uid, objectUrl })) continue;
           // `color_modified` mit hoch: die Farbe, die gerade als CSS3-Name
           // hinausging, ist unsere. Der Name ist eine verlustbehaftete Abbildung
           // des Hex-Werts, und ohne das Flag holte der nächste Inbound-Lauf
@@ -1200,14 +1223,15 @@ async function sync({ createClient } = {}) {
             UPDATE calendar_events
             SET external_source = 'caldav', external_calendar_id = ?,
                 external_object_url = ?, calendar_ref_id = ?,
-                outbound_dirty = 0, outbound_attempts = 0, outbound_move_to = NULL,
+                outbound_dirty = ?, outbound_attempts = 0, outbound_move_to = NULL, sync_state = 'clean', sync_error = NULL,
                 color_modified = CASE WHEN color IS NOT NULL THEN 1 ELSE color_modified END
             WHERE id = ?
-          `).run(uid, objectUrl, calRefId, event.id);
+          `).run(uid, objectUrl, calRefId, sessionPublicationDirty(event), event.id);
 
           accountEventCount++;
           accountChangedCount++;
         } catch (err) {
+          if (event.task_id) db.get().prepare("UPDATE calendar_events SET sync_state = 'error', sync_error = ? WHERE id = ?").run(err.message, event.id);
           log.error(`Failed to upload event ${event.id} to CalDAV:`, err.message);
         }
       }

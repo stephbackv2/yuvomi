@@ -20,6 +20,7 @@ const log = createLogger('Google');
 import { google } from 'googleapis';
 import crypto from 'node:crypto';
 import * as db from '../db.js';
+import { sessionPublicationCandidate, finishSessionPublication, rememberSessionPublication, sessionPublicationDirty } from './session-publication.js';
 import * as outbound from './calendar-outbound.js';
 import * as editOperations from './calendar-edit-operations.js';
 import { recoverFollowingCalendarEditAfterReadback } from './calendar-edit.js';
@@ -149,11 +150,11 @@ function persistGoogleEventRevision(eventId, etag) {
     database.prepare(`
       UPDATE calendar_events
       SET provider_revision = ?
-      WHERE external_calendar_id = ? AND external_source = 'google'
+      WHERE external_calendar_id = ? AND external_source = 'google' AND task_id IS NULL
     `).run(String(etag), eventId);
     const localRows = database.prepare(`
       SELECT id FROM calendar_events
-      WHERE external_calendar_id = ? AND external_source = 'google'
+      WHERE external_calendar_id = ? AND external_source = 'google' AND task_id IS NULL
     `).all(eventId);
     for (const row of localRows) {
       editOperations.clearCalendarEditSyncAfterReadback?.(row.id, 'google', database);
@@ -1179,7 +1180,7 @@ function setCalendarEnabled(calendarId, enabled, meta = {}) {
   if (!enabled) {
     db.get().prepare(`
       DELETE FROM calendar_events
-      WHERE external_source = 'google' AND calendar_ref_id IN (
+      WHERE external_source = 'google' AND task_id IS NULL AND calendar_ref_id IN (
         SELECT id FROM external_calendars WHERE source = 'google' AND external_id = ?
       )
     `).run(id);
@@ -1389,13 +1390,12 @@ function disconnect({ deleteEvents = false } = {}) {
  * runSync() statt in ihm, damit JEDER Ausstieg erfasst wird - auch das frühe
  * Werfen bei fehlendem Token, das ohne Verbindung der wahrscheinlichste Fall ist.
  */
-async function sync() {
-  return withSyncOutcome(db.get(), 'google', runSync);
+async function sync({ calendarClient } = {}) {
+  return withSyncOutcome(db.get(), 'google', () => runSync(calendarClient));
 }
 
-async function runSync() {
-  const client   = loadAuthorizedClient();
-  const calendar = google.calendar({ version: 'v3', auth: client });
+async function runSync(calendarClient) {
+  const calendar = calendarClient || google.calendar({ version: 'v3', auth: loadAuthorizedClient() });
 
   // Event-Farbpalette (colorId → Hex) einmalig für den ganzen Sync laden.
   const eventColorMap = await fetchEventColorMap(calendar);
@@ -1480,11 +1480,13 @@ async function runSync() {
   } else {
     const localEvents = db.get().prepare(`
       SELECT * FROM calendar_events
-      WHERE external_source = 'local' AND target_google_calendar_id IS NOT NULL
+      WHERE (external_source = 'local' AND target_google_calendar_id IS NOT NULL) OR json_extract(session_pending_target, '$.target_google_calendar_id') IS NOT NULL
     `).all();
 
     const activeIds = new Set(calendarIds);
-    for (const event of localEvents) {
+    for (const original of localEvents) {
+      const event = sessionPublicationCandidate(original, 'google');
+      if (!event) continue;
       const targetId = event.target_google_calendar_id;
       if (!activeIds.has(targetId)) {
         log.warn(`Target calendar ${targetId} not active, skipping event ${event.id}.`);
@@ -1499,10 +1501,23 @@ async function runSync() {
       }
       try {
         const gEvent  = localEventToGoogle(event, eventColorMap, meta?.timeZone || householdTimeZone(db.get()));
-        const created = await calendar.events.insert({ calendarId: targetId, requestBody: gEvent });
+        if (event.task_id) {
+          gEvent.id = event.session_publication_uid.replaceAll('-', '');
+          if (!event.session_pending_target) db.get().prepare('UPDATE calendar_events SET external_calendar_id = ? WHERE id = ?').run(gEvent.id, event.id);
+        }
+        rememberSessionPublication(event, { source: 'google', calendarExternalId: targetId, eventExternalId: gEvent.id });
+        let created;
+        try { created = await calendar.events.insert({ calendarId: targetId, requestBody: gEvent }); }
+        catch (error) {
+          if (!event.task_id || Number(error.code ?? error.response?.status) !== 409) throw error;
+          created = await calendar.events.get({ calendarId: targetId, eventId: gEvent.id });
+          const { id: ignoredIdentity, ...patch } = gEvent;
+          await calendar.events.patch({ calendarId: targetId, eventId: gEvent.id, requestBody: patch });
+        }
         // refId aus den Metadaten: trägt Name und Farbe des Kalenders statt der
         // rohen ID als Notnamen.
         const calRefId = meta.refId;
+        if (!finishSessionPublication(event, { source: 'google', calendarExternalId: targetId, eventExternalId: created.data.id })) continue;
         // `color_modified` mit hoch: die gerade hinausgegangene Farbe ist unsere.
         // Die elf `colorId`s sind eine verlustbehaftete Abbildung des Hex-Werts -
         // ohne das Flag holte der nächste Inbound-Lauf die gemappte Farbe zurück
@@ -1510,11 +1525,12 @@ async function runSync() {
           db.get().prepare(`
             UPDATE calendar_events
             SET external_calendar_id = ?, external_source = 'google', calendar_ref_id = ?,
-                outbound_dirty = 0, outbound_attempts = 0, outbound_move_to = NULL,
+                outbound_dirty = ?, outbound_attempts = 0, outbound_move_to = NULL, sync_state = 'clean', sync_error = NULL,
                 color_modified = CASE WHEN color IS NOT NULL THEN 1 ELSE color_modified END
             WHERE id = ?
-          `).run(created.data.id, calRefId, event.id);
+          `).run(created.data.id, calRefId, sessionPublicationDirty(event), event.id);
       } catch (err) {
+        if (event.task_id) db.get().prepare("UPDATE calendar_events SET sync_state = 'error', sync_error = ? WHERE id = ?").run(err.message, event.id);
         log.error(`Outbound error for event ${event.id}:`, err.message);
       }
     }
@@ -1635,7 +1651,7 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
   // Löschungen dort nicht mehr an.
   const del = db.get().prepare(`
     DELETE FROM calendar_events
-    WHERE external_calendar_id = ? AND external_source = 'google'
+    WHERE external_calendar_id = ? AND external_source = 'google' AND task_id IS NULL
       AND (? IS NULL OR calendar_ref_id IS NULL OR calendar_ref_id = ?)
   `);
 
@@ -1744,7 +1760,7 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
     const evColor = (item.colorId && colorMap[item.colorId]) || null;
 
     const existing = db.get().prepare(
-      'SELECT id, outbound_dirty FROM calendar_events WHERE external_calendar_id = ? AND external_source = ?'
+      `SELECT id, outbound_dirty, task_id FROM calendar_events WHERE external_calendar_id = ? AND (external_source = ? OR (task_id IS NOT NULL AND external_source = 'local' AND target_google_calendar_id IS NOT NULL))`
     ).get(item.id, 'google');
 
     // Store the remote baseline even while a local edit is waiting. The next
@@ -1756,7 +1772,7 @@ function upsertGoogleEvents(items, calRefId = null, calColor = GOOGLE_COLOR, col
     // nicht mit dem alten Google-Stand überschreiben (#593). Der Push kommt im
     // selben Lauf davor; kommt er nicht durch, gewinnt die lokale Änderung bis
     // sie durchgeht - sonst verschwände sie beim Nutzer ohne jede Spur.
-    if (existing?.outbound_dirty || activeGoogleOperationTouches(item, activeScopedOperations, currentGoogleCalendarId({ calendar_ref_id: calRefId }))) return;
+    if (existing?.task_id || existing?.outbound_dirty || activeGoogleOperationTouches(item, activeScopedOperations, currentGoogleCalendarId({ calendar_ref_id: calRefId }))) return;
 
     if (existing) {
       // color nur überschreiben, solange der Nutzer nicht lokal umgefärbt hat

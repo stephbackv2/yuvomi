@@ -1,7 +1,9 @@
-/** Local task allocations use calendar event identities, times and rendering.
- * No outbound target or recurrence is created by scheduling an allocation.
- */
+/** Shared task allocations keep calendar identities and use existing provider publication. */
+import { queueSessionPublicationDeletion } from './session-publication.js';
+import { attachTaskSessionProgress } from './task-session-progress.js';
+import { randomUUID } from 'node:crypto';
 import * as db from '../db.js';
+import { sessionTargets, resolveSessionTarget } from './task-session-targets.js';
 import { visibilityWhere } from './visibility.js';
 import { taskScopeWhere } from './task-scope.js';
 import { resolvePermissions, moduleAccessVerdict } from '../permissions.js';
@@ -10,6 +12,7 @@ import { householdTimeZone, isValidTimeZone, storedToInstantMs, utcToWall, today
 import { setAssignments } from '../utils/task-assignments.js';
 import { markTodoOutbound } from './caldav-todo-outbound.js';
 import { markEventOutbound, queueEventDeletion } from './calendar-outbound.js';
+import { transitionTaskStatus } from './task-transitions.js';
 import { eventRevisionToken } from './calendar-edit-metadata.js';
 
 const fail = (message, status = 400) => { throw Object.assign(new Error(message), { status }); };
@@ -34,13 +37,13 @@ function visibleTask(id, actor) {
 
 export function plannableTasks(actor, assignee = actor) {
   if (!Number.isSafeInteger(assignee) || assignee <= 0) fail("Invalid assignee.");
-  return db.get().prepare(`SELECT t.*, (SELECT COUNT(*) FROM calendar_events e WHERE e.task_id = t.id) AS session_count FROM tasks t WHERE
+  return attachTaskSessionProgress(db.get().prepare(`SELECT t.*, (SELECT COUNT(*) FROM calendar_events e WHERE e.task_id = t.id) AS session_count FROM tasks t WHERE
     ${taskScopeWhere('t', { bind: '@today' })}
     AND t.status <> 'done' AND t.archived_at IS NULL
     AND ${visibilityWhere('t', 'task_assignments', 'task_id', '@actor')}
     AND (t.assigned_to = @assignee OR EXISTS (SELECT 1 FROM task_assignments a WHERE a.task_id = t.id AND a.user_id = @assignee)
       OR (t.assigned_to IS NULL AND NOT EXISTS (SELECT 1 FROM task_assignments a WHERE a.task_id = t.id)))
-    ORDER BY t.due_date IS NULL, t.due_date, t.id`).all({ actor, assignee, today: todayKey(db.get()) });
+    ORDER BY t.due_date IS NULL, t.due_date, t.id`).all({ actor, assignee, today: todayKey(db.get()) }));
 }
 
 export function readTaskSessions(taskId, actor) {
@@ -84,6 +87,7 @@ export function scheduleTaskSession({ taskId, actor, body }) {
   return db.get().transaction(() => {
     const task = visibleTask(taskId, actor);
     if (task.parent_task_id || task.status === 'done' || task.archived_at || (task.start_date && task.start_date > todayKey(db.get()))) fail('Task is not schedulable.', 409);
+    const target = resolveSessionTarget(task, actor, body);
     let participants = db.get().prepare('SELECT user_id FROM task_assignments WHERE task_id = ? ORDER BY user_id').all(taskId).map(a => a.user_id);
     if (task.assigned_to && !participants.includes(task.assigned_to)) participants.push(task.assigned_to);
     const unassigned = !participants.length;
@@ -104,6 +108,10 @@ export function scheduleTaskSession({ taskId, actor, body }) {
       (title, start_datetime, end_datetime, tzid, created_by, assigned_to, visibility, task_id, session_status, session_assignment_mode, icon)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'unfinished', 'inherited', 'check-square')`).run(
       task.title, times.start, times.end, times.tzid, actor, task.assigned_to || actor, task.visibility, taskId).lastInsertRowid);
+    db.get().prepare(`UPDATE calendar_events SET target_google_calendar_id = ?, target_caldav_account_id = ?, target_caldav_calendar_url = ?,
+      target_outlook_account_id = ?, target_outlook_calendar_id = ?, outbound_dirty = ?, session_publication_uid = ? WHERE id = ?`).run(
+      target.target_google_calendar_id, target.target_caldav_account_id, target.target_caldav_calendar_url,
+      target.target_outlook_account_id, target.target_outlook_calendar_id, Object.values(target).some(Boolean) ? 1 : 0, randomUUID(), id);
     for (const uid of participants) db.get().prepare('INSERT INTO event_assignments (event_id, user_id) VALUES (?, ?)').run(id, uid);
     return readTaskSessions(taskId, actor).find(e => e.id === id);
   })();
@@ -127,8 +135,8 @@ export function removeTaskSession({ taskId, sessionId, actor }) {
 }
 
 export function updateTaskSession({ taskId, sessionId, actor, body }) {
-  const allowed = ['start_datetime', 'end_datetime', 'duration_minutes', 'tzid', 'expected_revision'];
-  if (Object.keys(body).some(key => !allowed.includes(key))) fail('Only session time can be changed.');
+  const allowed = ['start_datetime', 'end_datetime', 'duration_minutes', 'tzid', 'expected_revision', 'publication_target'];
+  if (Object.keys(body).some(key => !allowed.includes(key))) fail('Only session time and destination can be changed.');
   return db.get().transaction(() => {
     const before = visibleSession(taskId, sessionId, actor);
     if (before.session_status === 'completed') fail('Reopen the session before editing its duration.', 409);
@@ -138,8 +146,47 @@ export function updateTaskSession({ taskId, sessionId, actor, body }) {
       duration_minutes: body.duration_minutes ?? (Date.parse(before.end_datetime) - Date.parse(before.start_datetime)) / 60_000 });
     db.get().prepare('UPDATE calendar_events SET start_datetime = ?, end_datetime = ?, tzid = ? WHERE id = ?')
       .run(times.start, times.end, times.tzid, sessionId);
+    if (Object.hasOwn(body, 'publication_target')) {
+      const target = resolveSessionTarget(visibleTask(taskId, actor), actor, body);
+      const changed = Object.entries(target).some(([key, value]) => before[key] !== value);
+      if (!changed && before.session_pending_target) {
+        db.get().prepare("UPDATE calendar_events SET session_pending_target = NULL, sync_state = 'clean', sync_error = NULL WHERE id = ?").run(sessionId);
+      }
+      if (changed) {
+        const published = before.external_source !== 'local' || db.get().prepare('SELECT 1 FROM outlook_event_links WHERE event_id = ?').get(sessionId);
+        if (published && Object.values(target).some(Boolean)) {
+          db.get().prepare("UPDATE calendar_events SET session_pending_target = ?, sync_state = 'pending', sync_error = NULL WHERE id = ?").run(JSON.stringify(target), sessionId);
+        } else {
+          queueSessionPublicationDeletion(before);
+          db.get().prepare(`UPDATE calendar_events SET external_source = 'local', external_calendar_id = NULL,
+            calendar_ref_id = NULL, external_object_url = NULL, session_pending_target = NULL,
+            target_google_calendar_id = ?, target_caldav_account_id = ?, target_caldav_calendar_url = ?,
+            target_outlook_account_id = ?, target_outlook_calendar_id = ?, outbound_dirty = ?, sync_state = 'clean', sync_error = NULL WHERE id = ?`).run(
+            target.target_google_calendar_id, target.target_caldav_account_id, target.target_caldav_calendar_url,
+            target.target_outlook_account_id, target.target_outlook_calendar_id, Object.values(target).some(Boolean) ? 1 : 0, sessionId);
+        }
+      }
+    }
     const after = readTaskSessions(taskId, actor).find(event => event.id === sessionId);
     markEventOutbound(before, after);
     return readTaskSessions(taskId, actor).find(event => event.id === sessionId);
   })();
 }
+
+/** Only an explicit, first completion can advance the parent lifecycle. */
+export function completeTaskSession({ taskId, sessionId, actor }) {
+  return db.get().transaction(() => {
+    const session = visibleSession(taskId, sessionId, actor);
+    if (session.session_status !== 'completed') {
+      const task = visibleTask(taskId, actor);
+      if (task.status === 'done' || task.archived_at) fail('Task is already finished.', 409);
+      db.get().prepare(`UPDATE calendar_events SET session_status = 'completed',
+        session_completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), session_completed_by = ? WHERE id = ?`).run(actor, sessionId);
+      const unfinished = db.get().prepare("SELECT 1 FROM calendar_events WHERE task_id = ? AND session_status = 'unfinished' LIMIT 1").get(taskId);
+      transitionTaskStatus({ taskId, status: unfinished ? 'in_progress' : 'done', actingUserId: actor });
+    }
+    return readTaskSessions(taskId, actor).find(event => event.id === sessionId);
+  })();
+}
+
+export function taskSessionTargets(taskId, actor) { return sessionTargets(visibleTask(taskId, actor), actor); }

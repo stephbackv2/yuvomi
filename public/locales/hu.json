@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "{{count}} zárolt feladat kihagyva.",
         "listLoadError": "A feladatok betöltése sikertelen.",
         "checklistToggle": "Elem kipipálása",
-        "checkConflict": "A feladat időközben megváltozott. Nyissa meg újra."
+        "checkConflict": "A feladat időközben megváltozott. Nyissa meg újra.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} étkezésből",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 aktív szűrő",
         "filtersReset": "Összes szűrő törlése",
         "filtersDisplay": "Megjelenítés",
-        "agendaDayEmpty": "Semmi sincs tervezve"
+        "agendaDayEmpty": "Semmi sincs tervezve",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Háztartási jegyzetkategóriák kezelése"

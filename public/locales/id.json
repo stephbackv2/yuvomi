@@ -504,7 +504,9 @@
         "tagsSkippedLocked_one": "{{count}} tugas terkunci dilewati.",
         "listLoadError": "Tugas tidak dapat dimuat.",
         "checklistToggle": "Centang item",
-        "checkConflict": "Tugas telah berubah sementara itu. Silakan buka kembali."
+        "checkConflict": "Tugas telah berubah sementara itu. Silakan buka kembali.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} hidangan",
@@ -1017,7 +1019,12 @@
         "filtersActive_one": "1 filter aktif",
         "filtersReset": "Hapus semua filter",
         "filtersDisplay": "Tampilan",
-        "agendaDayEmpty": "Tidak ada rencana"
+        "agendaDayEmpty": "Tidak ada rencana",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Kelola kategori catatan rumah tangga"

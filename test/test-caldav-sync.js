@@ -46,6 +46,8 @@ describe('CalDAV Multi-Account Sync', () => {
       );
 
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id                          INTEGER PRIMARY KEY AUTOINCREMENT,
         title                       TEXT NOT NULL,
         external_calendar_id        TEXT,
@@ -166,6 +168,8 @@ describe('CalDAV Multi-Account Sync', () => {
     const db2 = new DatabaseSync(':memory:');
     db2.exec(`
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id              INTEGER PRIMARY KEY AUTOINCREMENT,
         title           TEXT NOT NULL,
         external_source TEXT NOT NULL DEFAULT 'local'
@@ -237,6 +241,8 @@ describe('pruneDeletedEvents (#508)', () => {
     db = new DatabaseSync(':memory:');
     db.exec(`
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id                   INTEGER PRIMARY KEY AUTOINCREMENT,
         title                TEXT NOT NULL,
         external_calendar_id TEXT,
@@ -419,6 +425,8 @@ describe('CalDAV sync yields to the event loop (#519)', () => {
         UNIQUE(source, external_id)
       );
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL, description TEXT,
         start_datetime TEXT, end_datetime TEXT, all_day INTEGER NOT NULL DEFAULT 0,
@@ -572,6 +580,8 @@ describe('CalDAV: RECURRENCE-ID-Overrides killen die Serie nicht (#549)', () => 
         default_assignee_user_id INTEGER, UNIQUE(source, external_id)
       );
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL, description TEXT,
         start_datetime TEXT, end_datetime TEXT, all_day INTEGER NOT NULL DEFAULT 0,
@@ -754,6 +764,8 @@ describe('CalDAV: No-op-Syncs bleiben im Standard-Log-Level still', () => {
         UNIQUE(source, external_id)
       );
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL, description TEXT,
         start_datetime TEXT, end_datetime TEXT, all_day INTEGER NOT NULL DEFAULT 0,
@@ -990,6 +1002,8 @@ describe('CalDAV: eine Bearbeitung friert die Farbe nicht mehr ein (#899)', () =
         UNIQUE(source, external_id)
       );
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL, description TEXT,
         start_datetime TEXT, end_datetime TEXT, all_day INTEGER NOT NULL DEFAULT 0,
@@ -1164,6 +1178,8 @@ describe('CalDAV: eine Aufgabenliste bleibt kein Terminziel (#617)', () => {
         UNIQUE(source, external_id)
       );
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL, description TEXT,
         start_datetime TEXT, end_datetime TEXT, all_day INTEGER NOT NULL DEFAULT 0,
@@ -1420,6 +1436,8 @@ describe('CalDAV: das Aufräumen beim Abwählen ist eine Wahl (#732)', () => {
         UNIQUE(source, external_id)
       );
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL, start_datetime TEXT,
         external_calendar_id TEXT, external_source TEXT NOT NULL DEFAULT 'local',
@@ -1607,6 +1625,8 @@ describe('CalDAV: neue Kalender sind opt-in (#732)', () => {
         default_assignee_user_id INTEGER, UNIQUE(source, external_id)
       );
       CREATE TABLE calendar_events (
+        task_id INTEGER, session_publication_uid TEXT, session_pending_target TEXT,
+        sync_state TEXT, sync_error TEXT,
         id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
         calendar_ref_id INTEGER, external_source TEXT NOT NULL DEFAULT 'local'
       );

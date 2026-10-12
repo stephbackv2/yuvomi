@@ -504,7 +504,9 @@
         "tagsSkippedLocked_one": "잠긴 작업 {{count}}개를 건너뛰었습니다.",
         "listLoadError": "할 일을 불러오지 못했습니다.",
         "checklistToggle": "항목 체크",
-        "checkConflict": "그 사이에 할 일이 변경되었습니다. 다시 열어 주세요."
+        "checkConflict": "그 사이에 할 일이 변경되었습니다. 다시 열어 주세요.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}}개 식사",
@@ -1017,7 +1019,12 @@
         "filtersActive_one": "필터 1개 적용됨",
         "filtersReset": "모든 필터 해제",
         "filtersDisplay": "표시",
-        "agendaDayEmpty": "예정된 일정 없음"
+        "agendaDayEmpty": "예정된 일정 없음",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "가정 메모 카테고리 관리"

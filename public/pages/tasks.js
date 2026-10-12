@@ -472,6 +472,7 @@ function renderTaskCard(task, opts = {}) {
         </button>` : ''}
       </div>
 
+      ${task.scheduled_work?.session_count ? `<p data-scheduled-work>${esc(t('tasks.scheduledWork'))}: ${Math.round(task.scheduled_work.percentage)}%</p>` : ''}
       ${progress !== null ? `
         <button type="button" class="subtask-progress" data-action="toggle-subtasks" data-id="${task.id}"
                 aria-expanded="${expandedSubtasks ? 'true' : 'false'}" aria-controls="subtasks-${task.id}"
@@ -479,7 +480,7 @@ function renderTaskCard(task, opts = {}) {
           <div class="subtask-progress__bar-wrap">
             <div class="subtask-progress__bar-fill" style="--progress-scale:${progress / 100}"></div>
           </div>
-          <span class="subtask-progress__text">${task.subtask_done}/${task.subtask_total}</span>
+          <span class="subtask-progress__text">${esc(t('tasks.subtaskProgress'))}: ${task.subtask_done}/${task.subtask_total}</span>
         </button>` : ''}
 
       ${task.subtasks?.length ? `

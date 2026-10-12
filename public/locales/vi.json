@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "Đã bỏ qua {{count}} công việc bị khoá.",
         "listLoadError": "Không thể tải nhiệm vụ.",
         "checklistToggle": "Đánh dấu mục",
-        "checkConflict": "Công việc đã thay đổi trong lúc này. Vui lòng mở lại."
+        "checkConflict": "Công việc đã thay đổi trong lúc này. Vui lòng mở lại.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} bữa ăn",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 bộ lọc đang bật",
         "filtersReset": "Xóa tất cả bộ lọc",
         "filtersDisplay": "Hiển thị",
-        "agendaDayEmpty": "Không có kế hoạch"
+        "agendaDayEmpty": "Không có kế hoạch",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Quản lý danh mục ghi chú gia đình"

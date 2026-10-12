@@ -252,7 +252,7 @@ export function eventEditMetadata(database, event) {
   return {
     revision: eventRevisionToken(event),
     edit_capabilities: capabilities,
-    sync: event?.id ? calendarEditSyncForEvent(event.id, database) : {
+    sync: event?.task_id && event.session_pending_target && !event.sync_error ? { ...calendarEditSyncForEvent(event.id, database), state: 'pending', retryable: true } : event?.task_id && event.sync_error ? { ...calendarEditSyncForEvent(event.id, database), state: 'error', error: event.sync_error, retryable: true } : event?.id ? calendarEditSyncForEvent(event.id, database) : {
       state: 'clean', operation_id: null, source: null, error: null, attempts: 0, retryable: false,
     },
     // A detached row has no children of its own.  Parent scopes must expose

@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "{{count}} vergrendelde taak overgeslagen.",
         "listLoadError": "Taken konden niet worden geladen.",
         "checklistToggle": "Item afvinken",
-        "checkConflict": "De taak is intussen gewijzigd. Open deze opnieuw."
+        "checkConflict": "De taak is intussen gewijzigd. Open deze opnieuw.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} maaltijden",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 filter actief",
         "filtersReset": "Alle filters wissen",
         "filtersDisplay": "Weergave",
-        "agendaDayEmpty": "Niets gepland"
+        "agendaDayEmpty": "Niets gepland",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Notitiecategorieën voor het huishouden beheren"

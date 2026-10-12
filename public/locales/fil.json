@@ -504,7 +504,9 @@
         "tagsSkippedLocked_one": "{{count}} naka-lock na gawain ang nilaktawan.",
         "listLoadError": "Hindi ma-load ang mga gawain.",
         "checklistToggle": "Markahan ang item",
-        "checkConflict": "Nabago ang gawain samantala. Pakibuksan itong muli."
+        "checkConflict": "Nabago ang gawain samantala. Pakibuksan itong muli.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} na (mga) pagkain",
@@ -1017,7 +1019,12 @@
         "filtersActive_one": "1 aktibong filter",
         "filtersReset": "Alisin ang lahat ng filter",
         "filtersDisplay": "Pagpapakita",
-        "agendaDayEmpty": "Walang nakaplano"
+        "agendaDayEmpty": "Walang nakaplano",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Pamahalaan ang mga kategorya ng tala ng sambahayan"

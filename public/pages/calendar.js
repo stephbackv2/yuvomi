@@ -2004,7 +2004,7 @@ function ensureCalendarGestureListeners() {
   _calendarGestureListeners = true;
 
   document.addEventListener('pointerdown', (event) => {
-    if (event.button !== 0 || event.pointerType === 'touch') return;
+    if (event.button !== 0 || event.pointerType === 'touch' || event.target.closest?.('[data-session-complete]')) return;
     const element = calendarEventElement(event.target);
     const source = eventFromElement(element);
     if (!element || !source || state.view === 'agenda') return;
@@ -2589,6 +2589,7 @@ function renderView() {
   } finally {
     _dayIndex.active = false;
   }
+  bindSessionCompletion(body);
   if (window.lucide) lucide.createIcons({ el: body });
   updateOfflineNotice();
   if (Number.isFinite(preservedGestureScrollTop)) {
@@ -2753,7 +2754,7 @@ function renderMonthDay(date, inMonth) {
          ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
          style="${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}"
-    >${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span><span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
+    >${renderSessionCheckbox(ev)}${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span><span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
   `).join('');
 
   const taskHtml = taskShown.map((tk) => renderTaskChip(tk, { interactive: false, icon: false })).join('');
@@ -2985,7 +2986,7 @@ function renderWeekView(container) {
             ${alldayEvs[i].map((ev) => `
               <div class="allday-event" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
                    style="${eventSurfaceStyle(ev)}"
-                   title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
+                   title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderSessionCheckbox(ev)}${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>
             `).join('')}
             ${tasksOnDay(d).map(renderTaskChip).join('')}
           </div>
@@ -3080,7 +3081,7 @@ function renderWeekEvent(ev, layout = null) {
     <div class="week-event" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${chipAssigneeTitleSuffix(ev)}">
-      ${renderEventAssigneeBar(ev)}
+      ${renderSessionCheckbox(ev)}${renderEventAssigneeBar(ev)}
       <span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span><div class="week-event__title">${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 14, maxVisible: 2 })}</div>
       <div class="week-event__time">${formatTime(ev.start_datetime)}${ev.end_datetime ? '–' + formatTime(ev.end_datetime) : ''}</div>
       <span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span>
@@ -3250,7 +3251,7 @@ function renderDayView(container) {
           ${allday.map((ev) => `
             <div class="allday-event" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
                  style="${eventSurfaceStyle(ev)}"
-                 title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>`).join('')}
+                 title="${esc(ev.title)}${ev.cal_name ? ' · ' + esc(ev.cal_name) : ''}${chipAssigneeTitleSuffix(ev)}">${renderSessionCheckbox(ev)}${renderEventAssigneeBar(ev)}<span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span>${eventIconHtml(ev.icon, 'event-icon event-icon--compact')}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span>${chipAssigneeStack(ev, { size: 16, maxVisible: 3 })}<span class="calendar-resize-handle calendar-resize-handle--end" data-resize-edge="end" aria-hidden="true"></span></div>`).join('')}
           ${tasksOnDay(state.cursor).map(renderTaskChip).join('')}
         </div>
       </div>` : ''}
@@ -3342,7 +3343,7 @@ function renderDayEvent(ev, layout = null) {
     <div class="day-event${roomy ? '' : ' day-event--tight'}" data-id="${ev.id}" ${ev.task_id ? 'data-task-session' : 'data-calendar-direct-event'}
          style="top:${top};height:${height};left:${left};width:${width};${eventSurfaceStyle(ev)}"
          title="${esc(ev.title)}${ev.location ? ' · ' + esc(fmtLocation(ev.location)) : ''}${chipAssigneeTitleSuffix(ev)}">
-      ${renderEventAssigneeBar(ev)}
+      ${renderSessionCheckbox(ev)}${renderEventAssigneeBar(ev)}
       <span class="calendar-resize-handle calendar-resize-handle--start" data-resize-edge="start" aria-hidden="true"></span><span class="day-event__spine" aria-hidden="true"></span>
       <span class="day-event__text">
         <span class="day-event__title">${hasEventIcon(ev.icon) ? eventIconHtml(ev.icon, 'event-icon event-icon--compact') : ''}${calendarRepeatIconHtml(ev)}<span class="day-event__name">${esc(ev.title)}</span></span>
@@ -3856,6 +3857,7 @@ function renderCalendarSearchState(kind) {
     setSearchLive(calendarSearchCountLabel());
   }
 
+  bindSessionCompletion(body);
   if (window.lucide) lucide.createIcons({ el: body });
 }
 
@@ -3889,6 +3891,7 @@ function renderCalendarSearchResults(body) {
   `);
 
   const results = body.querySelector('#cal-search-results');
+  bindSessionCompletion(results, searchResults);
   stagger(results.querySelectorAll('.agenda-event'));
 
   const activateResult = (evEl) => {
@@ -4005,7 +4008,7 @@ function renderAgendaEvent(ev, dayStr) {
   return `
     <div class="list-row agenda-event" data-id="${ev.id}" role="button" tabindex="0"
          aria-label="${esc(agendaEventAriaLabel(ev, timeStr))}">
-      ${renderEventAssigneeBar(ev)}
+      ${renderSessionCheckbox(ev)}${renderEventAssigneeBar(ev)}
       <div class="agenda-event__color" style="background:${esc(displayBg)};"></div>
       <div class="agenda-event__body">
         <div class="agenda-event__title">${eventIconHtml(ev.icon)}${calendarRepeatIconHtml(ev)}<span>${esc(ev.title)}</span></div>
@@ -5930,6 +5933,29 @@ function renderTaskPanel() {
   for (const card of panel.querySelectorAll('[data-plannable-task-id]')) card.onclick = () => openTaskFromCalendar(card.dataset.plannableTaskId);
 }
 
+function renderSessionCheckbox(event) {
+  if (!event.task_id) return '';
+  const disabled = event.session_status === 'completed' || moduleAccess('tasks') !== 'write' || moduleAccess('calendar') !== 'write';
+  return `<input type="checkbox" data-session-complete="${event.id}" aria-label="${esc(t('calendar.sessionComplete'))}" ${event.session_status === 'completed' ? 'checked' : ''} ${disabled ? 'disabled' : ''}>`;
+}
+
+function bindSessionCompletion(container, events = state.events) {
+  for (const checkbox of container.querySelectorAll('[data-session-complete]')) {
+    checkbox.onclick = event => event.stopPropagation();
+    checkbox.onkeydown = event => event.stopPropagation();
+    checkbox.onchange = async () => {
+      const session = events.find(event => String(event.id) === checkbox.dataset.sessionComplete);
+      if (!session) return;
+      checkbox.disabled = true;
+      try {
+        const { data: completed } = await api.post(`/tasks/${session.task_id}/sessions/${session.id}/complete`, {});
+        Object.assign(session, completed);
+        await loadRange(state.rangeFrom, state.rangeTo); renderView();
+      } catch (error) { checkbox.checked = false; checkbox.disabled = false; window.yuvomi?.showToast(error.data?.error || t('calendar.saveError'), 'danger'); }
+    };
+  }
+}
+
 function bindTaskSessionDrops(container) {
   for (const col of container.querySelectorAll('.week-view__col, .day-view__col, .month-day[data-date], .allday-cell[data-date]')) {
     col.addEventListener('dragover', event => {
@@ -5949,6 +5975,11 @@ function bindTaskSessionDrops(container) {
         return;
       }
       try {
+        const { data: targets } = await api.get(`/tasks/${taskId}/session-targets`);
+        if (targets.explicit_required) {
+          openTaskSessionEditor({ taskId, date: col.dataset.date, time: clickedTime(event, col), duration: state.panelDuration, onChanged: refresh });
+          return;
+        }
         await api.post(`/tasks/${taskId}/sessions`, {
           start_datetime: `${col.dataset.date}T${clickedTime(event, col)}`,
           duration_minutes: state.panelDuration,

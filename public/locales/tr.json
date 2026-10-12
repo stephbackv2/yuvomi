@@ -492,7 +492,9 @@
         "tagsSkippedLocked_one": "{{count}} kilitli görev atlandı.",
         "listLoadError": "Görevler yüklenemedi.",
         "checklistToggle": "Öğeyi işaretle",
-        "checkConflict": "Görev bu arada değişti. Lütfen yeniden açın."
+        "checkConflict": "Görev bu arada değişti. Lütfen yeniden açın.",
+        "scheduledWork": "Scheduled work",
+        "subtaskProgress": "Subtasks"
     },
     "shopping": {
         "importMealsPreviewMeals_few": "{{count}} öğünden",
@@ -1005,7 +1007,12 @@
         "filtersActive_one": "1 filtre etkin",
         "filtersReset": "Tüm filtreleri kaldır",
         "filtersDisplay": "Görünüm",
-        "agendaDayEmpty": "Planlanmış bir şey yok"
+        "agendaDayEmpty": "Planlanmış bir şey yok",
+        "sessionComplete": "Complete session",
+        "sessionAudience": "People with access to the chosen calendar can see this session, including for restricted tasks.",
+        "sessionChooseTarget": "Choose a destination",
+        "sessionSynced": "Synced to calendar",
+        "sessionPending": "Calendar sync pending"
     },
     "noteCategories": {
         "permissionLabel": "Ev notu kategorilerini yönet"

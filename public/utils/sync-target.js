@@ -122,3 +122,11 @@ export function buildSyncTargetOptions(targets, labels, current = '') {
 
   return options;
 }
+
+/** Encode the provider target fields returned by the event read API. */
+export function syncTargetValueFromEvent(event) {
+  if (event.target_google_calendar_id) return googleTargetValue(event.target_google_calendar_id);
+  if (event.target_caldav_account_id) return caldavTargetValue(event.target_caldav_account_id, event.target_caldav_calendar_url);
+  if (event.target_outlook_account_id) return outlookTargetValue(event.target_outlook_account_id, event.target_outlook_calendar_id);
+  return SYNC_TARGET_LOCAL;
+}

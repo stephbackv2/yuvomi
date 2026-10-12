@@ -34,6 +34,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Shared work sessions record completion and duration-weighted progress.**
+  Task lists and details distinguish scheduled work from subtasks. Completing
+  the last unfinished session uses normal task history, rewards and recurrence.
+- **Task sessions publish to a chosen connected calendar.** Scheduling proposes
+  the primary assignee's writable default; restricted tasks and missing defaults
+  require an explicit destination. Provider retries preserve session identities,
+  and replacements retain the previous publication until the new block exists.
+
 - **The desktop calendar task panel supports search, assignee and allocation filters.**
   Move it beside or below the calendar, resize it, and collapse it. Layout choices
   survive visits; All keeps allocated tasks available for additional work sessions.
