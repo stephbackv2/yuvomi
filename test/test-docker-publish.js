@@ -5,10 +5,10 @@ import { readFileSync } from 'node:fs';
 const workflow = readFileSync(
   new URL('../.github/workflows/docker-publish.yml', import.meta.url),
   'utf8'
-);
-const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
-const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-const installation = readFileSync(new URL('../docs/installation.md', import.meta.url), 'utf8');
+).replace(/\r\n/g, '\n');
+const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const ci = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const installation = readFileSync(new URL('../docs/installation.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
 function namedWorkflowStep(source, name) {
   const lines = source.split('\n');

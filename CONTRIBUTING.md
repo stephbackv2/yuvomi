@@ -25,7 +25,7 @@ Backend dependencies are evaluated case-by-case but must remain minimal. When in
 
 ### Prerequisites
 
-- Node.js ≥ 22 (required for `--experimental-sqlite` in tests)
+- Patched Node.js: 22.23.4+, 24.22.1+ or 26.12.1+. Select the development version pinned in `.nvmrc` with your Node version manager. Earlier releases are refused at startup because of CVE-2026-111497 in Brotli.
 - Git
 
 ### Getting started

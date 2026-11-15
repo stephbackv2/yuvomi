@@ -5,6 +5,7 @@
  * Abhängigkeiten: server/db.js, bcrypt, dotenv
  */
 
+import './server/check-runtime.js';
 import readline from 'node:readline';
 import bcrypt from 'bcrypt';
 import * as db from './server/db.js';

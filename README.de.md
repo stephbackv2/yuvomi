@@ -146,7 +146,7 @@ git clone https://github.com/ulsklyc/yuvomi.git && cd yuvomi
 node tools/installer/install-server.js
 ```
 
-Öffne **http://localhost:8090**. Braucht Node.js 18+ auf dem Host; der Container bringt sein eigenes Node 22 mit.
+Öffne **http://localhost:8090**. Braucht Node.js 18+ auf dem Host; der Container bringt sein eigenes, sicherheitsaktualisiertes Node 24.22.1 mit.
 
 ### Aus dem App-Store deines NAS
 

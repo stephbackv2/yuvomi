@@ -2,12 +2,13 @@
 
 Vollständige, annotierte Liste aller `npm run test:*`-Suiten - welche Suite deckt welche Invariante ab.
 
-Testinfrastruktur: In-Memory-SQLite (`--experimental-sqlite`), Node >= 22. Kein laufender Server nötig - Tests importieren die Route-Handler direkt.
+Testinfrastruktur: In-Memory-SQLite (`--experimental-sqlite`), gepatchtes Node aus `.nvmrc` oder gemaess `package.json` engines. Kein laufender Server nötig - Tests importieren die Route-Handler direkt.
 
 Neue Suite - drei Schritte, alle drei Pflicht: (1) `test/test-[module].js` anlegen, (2) `test:[module]`-Skript in `package.json` eintragen, (3) das Skript in die `test`-Kette (`package.json`, Script `test`) einhängen - sonst läuft die Suite weder unter `npm test` noch in CI. Genau so sind fünf Suiten monatelang CI-blind geblieben. Imports von App-Code (`server/`, `public/`, `tools/`) und Root-Dateien via `../`.
 
 ```bash
-npm test             # Alle Suiten (Node >=22)
+npm test             # Alle Suiten (gepatchtes Node aus .nvmrc)
+npm run test:node-runtime  # CVE-2026-111497: gepatchte Node-Versionen erzwingen, Start vor DB-Zugriff abbrechen, regulaere Brotli-JSON-Bodies weiter annehmen
 npm run test:db
 npm run test:rename-migration   # Oikos→Yuvomi Identifier-Migration: seamless rename invariants
 npm run test:schema-reconcile   # Schema-Selbstheilung gegen Migrations-Drift (#538): reconcileCriticalSchema ergänzt fehlende Spalten, obwohl die Migration als angewendet vermerkt ist

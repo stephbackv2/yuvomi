@@ -42,7 +42,7 @@ import { dictBlock, dictKeysMatching, dictValue, stripTags } from './docs-dict.j
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const READMES = { en: 'README.md', de: 'README.de.md' };
 
-const read = (rel) => readFileSync(resolve(ROOT, rel), 'utf8');
+const read = (rel) => readFileSync(resolve(ROOT, rel), 'utf8').replace(/\r\n/g, '\n');
 const readme = (lang) => read(READMES[lang]);
 
 /**

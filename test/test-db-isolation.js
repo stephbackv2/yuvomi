@@ -13,7 +13,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { dirname, resolve, relative, join } from 'node:path';
-import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -174,7 +173,9 @@ test('jede Suite, die server/db.js lädt, setzt DB_PATH', () => {
 });
 
 test('die Reihenfolgeprüfung erkennt wirkungslose Zuweisungen', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'yuvomi-dbguard-'));
+  // Die Fixture braucht relative Imports; Windows kann zwischen C: und E:
+  // keinen relativen Pfad bilden. Deshalb auf demselben Laufwerk anlegen.
+  const dir = mkdtempSync(join(HERE, '.yuvomi-dbguard-'));
   const dbPath = relative(dir, DB_MODULE).replaceAll('\\', '/');
   const write = (name, body) => {
     const file = join(dir, name);

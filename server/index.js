@@ -4,6 +4,7 @@
  * Abhängigkeiten: express, helmet, server/db.js, server/auth.js, server/routes/*
  */
 
+import './check-runtime.js';
 import express from 'express';
 import helmet from 'helmet';
 import compression from 'compression';

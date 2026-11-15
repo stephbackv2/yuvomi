@@ -1089,6 +1089,33 @@ in `/etc/containers/systemd/` and use `systemctl` without `--user`.
 
 ## Updates
 
+### Node runtime security update (28 October 2026)
+
+The image built from this checkout pins Node **24.22.1**, which fixes
+[CVE-2026-111497 in the Brotli decoder](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+Yuvomi refuses to start on unpatched Node versions before opening its database.
+Updating npm dependencies or Node on the Docker host does not update Node inside an
+existing container.
+
+For a local source build, rebuild and recreate the container from this checkout:
+
+```bash
+docker compose build --pull yuvomi
+docker compose up -d --force-recreate yuvomi
+docker compose exec -T yuvomi node -p 'process.version'
+```
+
+For pre-built images, wait for a release containing this change, then follow Option B
+below and verify the runtime with the same command. Pulling an older published image
+does not apply this source change. The running Node 24 version must be **24.22.1 or
+later**. For Podman, use `podman compose -f podman-compose.yml` in place of
+`docker compose`.
+
+Bare-metal and development installations need Node **22.23.4+**, **24.22.1+**, or
+**26.12.1+**. The development version is pinned in `.nvmrc`; install and select it
+with your Node version manager, then restart Yuvomi. Brotli compression remains
+enabled on patched runtimes.
+
 > **One-time step when upgrading past the container rename (Oikos → Yuvomi):** the Docker/Podman
 > service and container were renamed from `oikos` to `yuvomi`. Your data is safe - the database
 > volume is unchanged and the app migrates an existing `oikos.db` to `yuvomi.db` automatically on
