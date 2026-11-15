@@ -400,10 +400,11 @@ test('der Upload merkt sich, dass die hinausgeschickte Farbe unsere ist (#899)',
     for (const treffer of quelle.matchAll(UPDATE_RE)) {
       const setListe = treffer[1];
       const quelleAnbieter = setListe.match(/external_source\s*=\s*'(caldav|apple|google)'/);
-      // Ein echter lokaler Upload markiert den Outbound-Eintrag als erledigt.
+      // Session publications bind the dirty state; legacy uploads use zero.
+      // Both explicitly update the outbound state at the local upload handoff.
       // Identitaets-Reconciliation nach einer scoped Operation setzt zwar
       // external_source, fasst den lokalen Outbound-Zustand aber nicht an.
-      if (!quelleAnbieter || !/\boutbound_dirty\s*=\s*0\b/.test(setListe)) continue;
+      if (!quelleAnbieter || !/\boutbound_dirty\s*=\s*(?:0\b|\?)/.test(setListe)) continue;
       gefunden++;
       anbieter.push(quelleAnbieter[1]);
       if (!/color_modified/.test(setListe)) ohneFlag.push(datei);

@@ -6,6 +6,7 @@
  */
 
 import { DatabaseSync } from 'node:sqlite';
+import { throws as assertThrows } from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { MIGRATIONS_SQL } from '../server/db-schema-test.js';
 import { eachRule } from './css-rules.js';
@@ -1531,22 +1532,39 @@ test('Die Punktfassung gilt genau dann, wenn die Titelfassung nicht gewaehlt ist
 // setzt eine Breite auf einem ANDEREN Element und kann mit dem Klipp-Guard nie
 // kollidieren. Ein Guard, der solche Regeln mitzaehlt, erzwingt eine
 // Spezifitaets-Ruestung gegen einen Konflikt, den es nicht gibt.
-test('Der Klipp-Guard steht ueber jeder Fassungsregel, die display setzt', () => {
-  const clip = [...eachRule(calendarCss)].find((r) => r.selector.includes('.is-clipped')
-    && r.selector.includes('.month-day'));
-  assert(clip, 'die .is-clipped-Regel des Monatsrasters fehlt');
+function assertMonthClippingCascade(source) {
+  const rules = [...eachRule(source)].flatMap((rule) =>
+    rule.selector.split(',').map((selector) => ({ ...rule, selector: selector.trim() })));
+  // Only declarations on the card itself compete with its clipping rule.
+  // A display rule on a child cannot make a hidden parent visible.
+  const chipClass = (selector) => selector.split(/[\s>+~]+/).at(-1).split(':')[0]
+    .match(/\.(month-day__event|cal-task-chip|month-day__holiday)(?![\w-])/)?.[1];
+  const clips = rules.filter((rule) => rule.selector.includes('.is-clipped') && chipClass(rule.selector));
+  assert(clips.length === 3, 'die .is-clipped-Regeln des Monatsrasters fehlen');
   // Spezifitaet zaehlt das :not()-Argument mit - deshalb einfach alle
   // Klassen-Token des Selektors, inklusive derer in der Klammer.
-  const classes = (sel) => (sel.split(',')[0].match(/\.[a-zA-Z][\w-]*/g) ?? []).length;
-  const variant = [...eachRule(calendarCss)].filter((r) =>
-    (r.selector.includes('.month-view--titles') || r.selector.includes(':not(.month-view--titles)'))
+  const classes = (sel) => (sel.match(/\.[a-zA-Z][\w-]*/g) ?? []).length;
+  const variant = rules.filter((r) => chipClass(r.selector)
+    && !r.selector.includes('.is-clipped')
+    && (r.selector.includes('.month-view--titles') || r.selector.includes(':not(.month-view--titles)'))
     && /(?:^|;)\s*display\s*:/.test(r.body));
   assert(variant.length > 0, 'keine Fassungsregel setzt display - dann prueft dieser Guard nichts');
   for (const rule of variant) {
+    const clip = clips.find((candidate) => chipClass(candidate.selector) === chipClass(rule.selector));
+    assert(clip, `die Klipp-Regel fuer ${rule.selector} fehlt`);
     assert(classes(clip.selector) > classes(rule.selector),
       `.is-clipped traegt ${classes(clip.selector)} Klassen, ${rule.selector.trim()} `
       + `traegt ${classes(rule.selector)} - bei Gleichstand gewinnt die spaetere Regel, `
       + 'und das ist die Fassung');
+  }
+}
+
+test('Der Klipp-Guard steht ueber jeder Fassungsregel, die display setzt', () => {
+  assertMonthClippingCascade(calendarCss);
+  // Prove the guard still rejects a later rule that resurrects each card type.
+  for (const card of ['month-day__event', 'cal-task-chip', 'month-day__holiday']) {
+    const conflicting = `.month-view:not(.month-view--titles) .month-day .${card} { display: inline-flex; }`;
+    assertThrows(() => assertMonthClippingCascade(`${calendarCss}\n${conflicting}`), /Gleichstand/);
   }
 });
 
