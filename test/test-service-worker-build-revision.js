@@ -4,7 +4,7 @@
  * Run: node --test test/test-service-worker-build-revision.js
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -76,12 +76,14 @@ test('falls back to the app version when APP_BUILD_REVISION is blank after trimm
   assert.equal(response.body, "globalThis.cacheRevision = '2.59.0';");
 });
 
-test('reloads an edited service worker source from an isolated file', () => {
+test('reloads an edited service worker when its size changes within the same timestamp', () => {
   const directory = mkdtempSync(join(tmpdir(), 'yuvomi-service-worker-'));
   const sourcePath = join(directory, 'sw.js');
 
   try {
     writeFileSync(sourcePath, "globalThis.cacheRevision = '__YUVOMI_BUILD_REVISION__';\n");
+    const timestamp = new Date('2026-01-01T00:00:00Z');
+    utimesSync(sourcePath, timestamp, timestamp);
     const load = serviceWorkerModule.createServiceWorkerResponseLoader(sourcePath, {
       appVersion: '2.59.0',
       buildRevision: 'acceptance-route-test',
@@ -97,6 +99,8 @@ test('reloads an edited service worker source from an isolated file', () => {
       "globalThis.cacheRevision = '__YUVOMI_BUILD_REVISION__';\n// edited\n",
     );
 
+    // Reproduce filesystems where consecutive writes share an mtime.
+    utimesSync(sourcePath, timestamp, timestamp);
     assert.match(load().body, /\/\/ edited/);
   } finally {
     rmSync(directory, { recursive: true, force: true });

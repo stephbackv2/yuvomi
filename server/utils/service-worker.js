@@ -31,16 +31,18 @@ export function buildServiceWorkerResponse(source, { appVersion, buildRevision }
 
 export function createServiceWorkerResponseLoader(sourcePath, options) {
   let cachedMtimeMs;
+  let cachedSize;
   let cachedResponse;
 
   return function loadServiceWorkerResponse() {
-    const mtimeMs = statSync(sourcePath).mtimeMs;
-    if (cachedMtimeMs !== mtimeMs) {
+    const { mtimeMs, size } = statSync(sourcePath);
+    if (cachedMtimeMs !== mtimeMs || cachedSize !== size) {
       cachedResponse = buildServiceWorkerResponse(
         readFileSync(sourcePath, 'utf8'),
         options,
       );
       cachedMtimeMs = mtimeMs;
+      cachedSize = size;
     }
     return cachedResponse;
   };

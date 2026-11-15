@@ -7,12 +7,14 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 // Nested under a root we control, so one test can revoke write access on the
 // parent and exercise the "backup directory is not writable" path (issue #579).
-const TEST_BACKUP_ROOT = './test-backups';
-const TEST_BACKUP_DIR = path.join(TEST_BACKUP_ROOT, 'store');
+// Use the native temporary filesystem so chmod works from Windows-mounted repos.
+const TEST_BACKUP_ROOT = await fs.mkdtemp(path.join(tmpdir(), 'yuvomi-backup-scheduler-'));
+const TEST_BACKUP_DIR = path.relative(process.cwd(), path.join(TEST_BACKUP_ROOT, 'store'));
 
 // Mock environment variables
 process.env.BACKUP_ENABLED = 'false'; // Disable scheduler for tests
