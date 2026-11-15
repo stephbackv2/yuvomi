@@ -2262,13 +2262,14 @@
 }
 .calendar-task-panel__title { font-size: var(--text-base); margin: 0 0 var(--space-2); }
 .calendar-task-panel__hint { font-size: var(--text-sm); color: var(--color-text-secondary); margin-bottom: var(--space-3); }
-.calendar-task-card { display: flex; gap: var(--space-2); align-items: center; width: 100%; padding: var(--space-3); margin-bottom: var(--space-2); border: var(--space-px) solid var(--color-border); border-radius: var(--radius-full); color: var(--color-text-primary); background: var(--color-surface-work); text-align: start; cursor: grab; }
+.calendar-task-card { display: flex; gap: var(--space-2); align-items: center; width: 100%; padding: var(--space-3); border: var(--space-px) solid var(--color-border); border-radius: var(--radius-full); color: var(--color-text-primary); background: var(--color-surface-work); text-align: start; cursor: grab; }
 .calendar-task-card:active { cursor: grabbing; }
 .is-task-drop-target { outline: var(--space-0h) solid var(--color-accent); outline-offset: calc(-1 * var(--space-0h)); }
 @media (max-width: 1023px) {
   [data-task-session] .calendar-resize-handle { display: none; }
 }
 
+.calendar-task-panel__cards { display: flex; flex-direction: column; gap: var(--space-2); }
 
 @media (min-width: 1024px) {
   .calendar-task-panel:not([hidden]) { width: var(--task-panel-size); flex-basis: var(--task-panel-size); max-width: 45%; }

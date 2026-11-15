@@ -5902,7 +5902,7 @@ function renderTaskPanel() {
     <label>${esc(t('calendar.panelAssignee'))}<select id="task-panel-assignee"><option value="">${esc(t('calendar.panelMine'))}</option>${state.users.filter(u => u.id !== state.currentUserId).map(u => `<option value="${u.id}">${esc(u.display_name)}</option>`).join('')}</select></label>
     <label>${esc(t('calendar.panelAllocations'))}<select id="task-panel-allocation"><option value="all">${esc(t('calendar.panelAll'))}</option><option value="unscheduled">${esc(t('calendar.panelUnscheduled'))}</option></select></label>
     <p class="calendar-task-panel__hint">${esc(t('calendar.taskDragHint'))}</p>
-    ${tasks.map(task => `<button type="button" class="calendar-task-card" draggable="true" data-plannable-task-id="${task.id}"><i data-lucide="check-square" class="icon-sm" aria-hidden="true"></i><span>${esc(task.title)}</span></button>`).join('') || `<p class="calendar-task-panel__hint">${esc(t('tasks.emptyTitle'))}</p>`}</div>`);
+    <div class="calendar-task-panel__cards">${tasks.map(task => `<button type="button" class="calendar-task-card" draggable="true" data-plannable-task-id="${task.id}"><i data-lucide="check-square" class="icon-sm" aria-hidden="true"></i><span>${esc(task.title)}</span></button>`).join('') || `<p class="calendar-task-panel__hint">${esc(t('tasks.emptyTitle'))}</p>`}</div></div>`);
   panel.querySelector('#task-panel-collapse').onclick = () => { state.panelCollapsed = !state.panelCollapsed; save(); renderTaskPanel(); };
   panel.querySelector('#task-panel-placement').value = state.panelPlacement;
   panel.querySelector('#task-panel-placement').onchange = event => { state.panelPlacement = event.target.value; save(); renderTaskPanel(); };
