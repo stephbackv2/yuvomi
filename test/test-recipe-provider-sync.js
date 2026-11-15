@@ -432,8 +432,9 @@ test('legacy instructions backfill once at unchanged timestamp, preserving recip
     assert.equal(data.ingredients[0].quantity, '400 g');
     assert.equal(data.source, 'mealie');
     assert.match(data.recipe_url, /bread$/);
-    const mealRead = await (await fetch(`http://127.0.0.1:${server.address().port}/meals?from=2026-10-05&to=2026-10-05`)).json();
+    const mealRead = await (await fetch(`http://127.0.0.1:${server.address().port}/meals?week=2026-10-05`)).json();
     const meal = mealRead.data.find(row => row.id === mealId);
+    assert.ok(meal, 'the fixture meal is returned in its requested week');
     assert.equal(meal.recipe_id, recipeId);
     assert.equal(meal.ingredients[0].quantity, '800 g');
     _setAdapterFactory(fakeAdapter(summaries, {}));

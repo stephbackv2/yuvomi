@@ -99,11 +99,19 @@ suite registration. The four runtime-policy/metadata/Brotli unit checks also pas
 Separate entry-point probes confirm both server startup and setup reject an
 unpatched version before opening the database.
 
-The registered `npm test` gate was attempted but stops in the runtime suite:
-the execution sandbox denies the two child-process probes with `spawnSync EPERM`.
-Local-server integration tests also encounter `listen EPERM`. These are recorded
-validation limitations, with no exceptions accepted. A repeatable validation
-command has been prepared for the user's regular WSL terminal; its full-suite
-result is still pending. Current logs are local under
+The sandbox attempt stopped in the runtime suite because it denies child-process
+probes with `spawnSync EPERM`; local-server tests also encounter `listen EPERM`.
+The user then ran validation from a regular WSL terminal. All six runtime checks
+passed, including both startup rejection probes. The complete independent run
+exercised **311 registered command groups: 308 passed and three failed** because
+of outdated test assumptions about calendar CSS subjects, bound session-publication
+state, and the meals endpoint's week query.
+
+Those three test assumptions are corrected. Focused reruns passed **166 calendar
+checks** and **19 recipe-provider-sync checks**, so every registered group now has
+a passing result across the complete run and the correction reruns. An uninterrupted
+`npm test` has not been repeated after these test-only corrections. No baseline
+exceptions were accepted. The separate browser/release guards and live-provider
+acceptance remain outside this validation record. Logs are local under
 `.scratch/repo-readiness-20261115/`. Production runtime and deployment state have
 not been rechecked in this development pass.
