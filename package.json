@@ -287,7 +287,7 @@
     "test:recipe-provider-sync": "DB_PATH=:memory: node --experimental-sqlite --test test/test-recipe-provider-sync.js",
     "test:recipe-provider-routes": "node --experimental-sqlite --test test/test-recipe-provider-routes.js",
     "test:recipe-provider-migration": "node --experimental-sqlite --test test/test-recipe-provider-migration.js",
-    "test:bring-recipes-export": "node --test test/test-bring-recipes-export.js test/test-bring-recipes-import.js",
+    "test:bring-recipes-export": "node --test test/test-bring-recipes-export.js test/test-bring-recipes-import.js test/test-bring-integration.js",
     "test:weather": "DB_PATH=:memory: node --experimental-sqlite --test test/test-weather.js",
     "test:holidays": "DB_PATH=:memory: node --experimental-sqlite --test test/test-holidays.js",
     "test:preferences-weather": "node --experimental-sqlite --test test/test-preferences-weather.js",

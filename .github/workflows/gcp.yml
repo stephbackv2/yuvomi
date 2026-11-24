@@ -42,7 +42,6 @@ jobs:
           cache: npm
       - run: npm ci --engine-strict
       - run: npm test
-      - run: node --test test/test-bring-integration.js
 
   deploy:
     needs: test
@@ -100,7 +99,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
-      - run: node --test test/test-bring-recipes-export.js test/test-bring-recipes-import.js test/test-bring-integration.js
+      - run: npm run test:bring-recipes-export
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           project_id: ${{ env.GCP_PROJECT }}
