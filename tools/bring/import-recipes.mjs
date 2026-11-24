@@ -149,7 +149,7 @@ export function planBringRecipeImport(exportData, existingRecipes = []) {
   return { create, skippedExisting, skippedDuplicate, invalid };
 }
 
-class YuvomiRecipeClient {
+export class YuvomiClient {
   constructor({ baseUrl, apiToken, fetchImpl = globalThis.fetch, allowInsecureHttp = false }) {
     if (typeof fetchImpl !== 'function') throw new BringImportError('A fetch implementation is required');
     this.baseUrl = normalizeYuvomiUrl(baseUrl, allowInsecureHttp);
@@ -200,6 +200,21 @@ class YuvomiRecipeClient {
     if (!body.data?.id) throw new BringImportError('Yuvomi create-recipe response is missing data.id');
     return body.data;
   }
+
+  async listShoppingItems(listId) {
+    const body = await this.#request(`api/v1/shopping/${listId}/items`);
+    if (!Array.isArray(body.data)) throw new BringImportError('Yuvomi shopping response is missing data[]');
+    return body.data;
+  }
+
+  async changeShoppingItem(path, method, payload) {
+    const body = await this.#request(`api/v1/shopping/${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
+    return body.data;
+  }
 }
 
 export async function importBringRecipes({
@@ -207,10 +222,11 @@ export async function importBringRecipes({
   yuvomiUrl,
   apiToken,
   apply = false,
+  rejectInvalid = false,
   fetchImpl = globalThis.fetch,
   allowInsecureHttp = false,
 }) {
-  const client = new YuvomiRecipeClient({
+  const client = new YuvomiClient({
     baseUrl: yuvomiUrl,
     apiToken,
     fetchImpl,
@@ -218,6 +234,9 @@ export async function importBringRecipes({
   });
   const existing = await client.listRecipes();
   const plan = planBringRecipeImport(exportData, existing);
+  if (rejectInvalid && plan.invalid.length) {
+    throw new BringImportError(`Bring export contains ${plan.invalid.length} invalid recipes`);
+  }
   const created = [];
 
   if (apply) {

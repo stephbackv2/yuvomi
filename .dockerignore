@@ -3,8 +3,11 @@ node_modules
 .github
 .worktrees
 .scratch/
+.cache/
 .env
 .env.*
+gha-creds-*.json
+gha-creds-*.json
 
 # Local AI/dev tooling. None of it exists in a fresh clone, but a build from a
 # working copy would otherwise bake it into a published image.

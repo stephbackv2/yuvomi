@@ -1,5 +1,7 @@
 # GCP deployment - 2 October 2026
 
+See [Google Cloud CI/CD](#google-cloud-cicd) for the current release workflow. The October deployment details below document the original cutover and its recovery snapshot.
+
 Yuvomi is live at **https://self-host.mattiss4you.de** with the calendar, recipe-import and Bring! work requested by the user. The cutover finished at **06:43 UTC / 08:43 Europe/Berlin**. Public HTTPS verification passed at 07:00 UTC. Both Yuvomi and the existing Vaultwarden service are healthy.
 
 ## Release and source
@@ -107,3 +109,40 @@ The personal fork is [stephbackv2/yuvomi](https://github.com/stephbackv2/yuvomi)
 The original workspace now uses the personal fork as `origin` and `https://github.com/ulsklyc/yuvomi.git` as `upstream`. The feature source matches the deployed version, including calendar, recipes and Bring! work; the running VM continues to use commit `619911292e961dd8cb5f8b54e6cf62ba708f3a99`.
 
 Continue development on the customization branch and push it to `origin`. Fetch `upstream` when deliberately preparing an upstream update; reconcile and validate it before deploying another image. The repository's upstream `main` branch is retained separately from the personal customization branch.
+
+## Google Cloud CI/CD
+
+The [Google Cloud deployment workflow](../.github/workflows/gcp.yml) runs the full test suite on pushes to `codex/household-customizations` in `stephbackv2/yuvomi`. On success, it builds the tested commit, pushes the image to the regional Artifact Registry and deploys its digest over IAP. The VM keeps Yuvomi on `127.0.0.1:3000` behind Caddy. The deployment checks the live health endpoint and service-worker revision, with a cold SQLite backup and automatic rollback if local health or revision verification fails. GitHub Actions then verifies HTTPS on the reserved IPv4 address with Yuvomi's hostname and certificate.
+
+### One-time configuration
+
+1. Run `deploy/gcp/provision.ps1` with an authenticated Google Cloud administrator account. It creates the registry, Secret Manager entries and GitHub federation with separate Deploy and Bring service accounts. The provider accepts the personal fork's signed repository, branch, workflow and environment claims. The deploying identity has IAP access to port 22 on the Yuvomi VM and repository-scoped Artifact Registry access. The Bring identity has access to the Bring secret only.
+2. Create the GitHub environments `gcp-production` and `gcp-bring`, and restrict both to `codex/household-customizations`. Set `GCP_WORKLOAD_IDENTITY_PROVIDER` on both and use the corresponding `GCP_SERVICE_ACCOUNT` printed by the provisioning script. Set `GCE_KNOWN_HOST` on `gcp-production` to the verified line from the host installer.
+3. Create a dedicated Ed25519 SSH key. Add its private key as the latest version of `yuvomi-deploy-ssh` in Secret Manager. As a VM administrator, run `sudo bash install-host.sh release.py deploy-key.pub` from the directory containing those files. This installs a forced command on the VM for `yuvomi-deploy`, restricted to IAP. Run the installer again to update the host-side deployment program or rotate the public key.
+4. Stream the current runtime configuration directly to the first version of `yuvomi-runtime`. For example, after copying `capture-runtime.py` to the VM:
+
+   ```sh
+   gcloud compute ssh yuvomi --project=self-hosted-yuvomi --zone=us-east1-c \\
+     --tunnel-through-iap --command='sudo python3 /path/to/capture-runtime.py' | \\
+     gcloud secrets versions add yuvomi-runtime --project=self-hosted-yuvomi --data-file=-
+   ```
+
+   The secret is a JSON object whose keys and values are environment variable names and strings. This preserves keys such as `SESSION_SECRET`, `DB_KEY` and the existing `DB_PATH`. Future deploys inject this configuration as container environment variables. After the first successful CI deployment, archive the retired Compose configuration and any old `.env` in a root-only recovery location. Use `docker restart yuvomi` for a restart and the workflow for a new deployment.
+5. Keep the workflow definition on the fork's default branch as well so GitHub enables the manual Run workflow button. Select `codex/household-customizations` in the branch picker for any manual operation against the VM.
+
+Deployment backups under `/opt/yuvomi/deployment-backups/gcp-*` contain household SQLite data. The corresponding stopped Docker containers retain the preceding image and its configuration. A manual rollback after a successful deployment must account for writes made after that recovery point. Review disk use and retain the recovery points you need.
+
+### Bring! migration and list test
+
+Add a JSON object to the `yuvomi-bring` Secret Manager secret with these string keys:
+
+- `BRING_EMAIL` and `BRING_PASSWORD` for the household's Bring! account. Use a Bring-local password for a social-login account.
+- `BRING_COUNTRY` if the country differs from the tool's default `DE`.
+- `YUVOMI_API_TOKEN` for the household member who should own the imported recipes. Grant recipe and shopping read/write access using that member's permissions.
+- `BRING_TEST_LIST_ID` and `YUVOMI_TEST_LIST_ID` for the list check. Use dedicated, empty shopping lists, including empty recently used history in Bring!.
+
+In the deployment workflow, choose **bring-preview** for counts without writes. **bring-import** fetches the entire saved collection, including templates, and creates native Yuvomi recipes through the API. It skips existing titles and duplicate entries on repeat runs. **bring-sync-test** copies a temporary marker item through add, quantity edit, check, uncheck and removal in both directions and verifies both systems. It cleans up the marker after failures where the APIs remain reachable. The list check is a one-off exercise of the unofficial Bring! API. Continuous mirroring of household lists would require a persistent bridge and a Yuvomi change feed, as described in the [Bring! feasibility notes](bring-shopping-sync-feasibility.md).
+
+### IPv4 for Yuvomi and Vaultwarden
+
+The Compute Engine address `yuvomi-ipv4` reserves `35.196.186.141` for this VM in `us-east1`. STRATO's `self-host.mattiss4you.de` A record must point to that address. `vault.mattiss4you.de` inherits the same IPv4 through its CNAME. Leave the AAAA record pointing at the VM's reserved IPv6 address. Caddy routes the two hostnames to their existing loopback listeners. Verify public IPv4 HTTPS with `curl -4fsS https://self-host.mattiss4you.de/health` and `curl -4fsS https://vault.mattiss4you.de/alive`.

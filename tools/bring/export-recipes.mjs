@@ -55,6 +55,7 @@ async function requestJson(fetchImpl, url, options, label) {
   try {
     response = await fetchImpl(url, {
       ...options,
+      redirect: 'error',
       signal: options.signal || AbortSignal.timeout(DEFAULT_TIMEOUT_MS),
     });
   } catch (cause) {
@@ -65,6 +66,11 @@ async function requestJson(fetchImpl, url, options, label) {
     throw new BringExportError(`${label} failed with HTTP ${response.status}`, {
       status: response.status,
     });
+  }
+
+  if (options.method === 'PUT') {
+    await response.body?.cancel();
+    return;
   }
 
   try {
@@ -144,6 +150,30 @@ export class BringRecipeClient {
     };
   }
 
+  async readList(listId) {
+    const url = new URL(`v2/bringlists/${encodeURIComponent(listId)}`, this.baseUrl);
+    const data = await requestJson(this.fetch, url, {
+      method: 'GET', headers: this.#headers(),
+    }, 'Bring list read');
+    const { purchase, recently } = data.items ?? {};
+    if (!Array.isArray(purchase) || !Array.isArray(recently)) {
+      throw new BringExportError('Bring list response is missing purchase or recently items');
+    }
+    return { purchase, recently };
+  }
+
+  async changeListItem(listId, itemId, specification, operation) {
+    const url = new URL(`v2/bringlists/${encodeURIComponent(listId)}/items`, this.baseUrl);
+    await requestJson(this.fetch, url, {
+      method: 'PUT',
+      headers: { ...this.#headers(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        changes: [{ itemId, specification, operation, accuracy: '0.0', altitude: '0.0', latitude: '0.0', longitude: '0.0' }],
+        sender: '',
+      }),
+    }, 'Bring list mutation');
+  }
+
   async getInspirationsPage({ filter = 'mine', offset = 0 } = {}) {
     if (!Number.isSafeInteger(offset) || offset < 0) {
       throw new BringExportError('offset must be a non-negative integer');
@@ -179,6 +209,9 @@ export class BringRecipeClient {
       if (Number.isSafeInteger(total) && total >= 0) reportedTotal = total;
 
       if (pageEntries.length === 0) {
+        if (reportedTotal != null && offset < reportedTotal) {
+          throw new BringExportError('Bring recipe export ended before the reported total');
+        }
         finished = true;
         break;
       }
