@@ -1,0 +1,115 @@
+name: Google Cloud deployment
+
+on:
+  push:
+    branches: [codex/household-customizations]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation
+        type: choice
+        options: [deploy, bring-preview, bring-import, bring-sync-test]
+        default: deploy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: yuvomi-gcp-production
+  cancel-in-progress: false
+
+env:
+  GCP_PROJECT: self-hosted-yuvomi
+  GCE_INSTANCE: yuvomi
+  GCE_ZONE: us-east1-c
+  IMAGE_REPOSITORY: us-east1-docker.pkg.dev/self-hosted-yuvomi/yuvomi/yuvomi
+  PUBLIC_URL: https://self-host.mattiss4you.de
+  PUBLIC_IPV4: 35.196.186.141
+  TZ: Europe/Berlin
+
+jobs:
+  test:
+    if: github.repository == 'stephbackv2/yuvomi' && github.ref == 'refs/heads/codex/household-customizations' && (github.event_name == 'push' || inputs.operation == 'deploy')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci --engine-strict
+      - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    environment: gcp-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the tested revision
+        run: docker build --build-arg "APP_BUILD_REVISION=$GITHUB_SHA" --tag "$IMAGE_REPOSITORY:$GITHUB_SHA" .
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ env.GCP_PROJECT }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - name: Publish by digest
+        id: publish
+        shell: bash
+        run: |
+          gcloud auth print-access-token | docker login "${IMAGE_REPOSITORY%%/*}" -u oauth2accesstoken --password-stdin
+          docker push "$IMAGE_REPOSITORY:$GITHUB_SHA"
+          image=$(docker image inspect "$IMAGE_REPOSITORY:$GITHUB_SHA" --format '{{index .RepoDigests 0}}')
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+      - name: Deploy over IAP
+        env:
+          IMAGE: ${{ steps.publish.outputs.image }}
+          GCE_KNOWN_HOST: ${{ vars.GCE_KNOWN_HOST }}
+        run: python3 deploy/gcp/ship.py
+      - name: Verify HTTPS on the reserved IPv4 address
+        shell: bash
+        run: |
+          route="${PUBLIC_URL#https://}:443:$PUBLIC_IPV4"
+          curl --fail --silent --show-error --max-time 20 --resolve "$route" "$PUBLIC_URL/health"
+          service_worker=$(curl --fail --silent --show-error --max-time 20 --resolve "$route" "$PUBLIC_URL/sw.js")
+          grep -Fq "$GITHUB_SHA" <<< "$service_worker"
+
+  bring:
+    if: github.repository == 'stephbackv2/yuvomi' && github.ref == 'refs/heads/codex/household-customizations' && github.event_name == 'workflow_dispatch' && inputs.operation != 'deploy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: gcp-bring
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - run: npm run test:bring-recipes-export
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: ${{ env.GCP_PROJECT }}
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - name: Run the selected Bring! operation
+        shell: bash
+        env:
+          OPERATION: ${{ inputs.operation }}
+        run: |
+          gcloud secrets versions access latest --secret=yuvomi-bring --project="$GCP_PROJECT" |
+            node tools/bring/integration.mjs "$OPERATION"
